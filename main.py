@@ -42,6 +42,7 @@ class AdminState(StatesGroup):
     stock_product_description=State()
     stock_plan_duration=State()
     stock_plan_prices=State()
+    bulk_plan_input=State()
     stock_keys=State()
     reward_keys=State()
     admin_input=State()
@@ -851,8 +852,14 @@ async def ac_deleteproduct_confirm(call:CallbackQuery):
 @dp.callback_query(F.data.startswith("ac:addplan:"))
 async def ac_addplan(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
-    pid=int(call.data.rsplit(":",1)[1]);await state.update_data(stock_product_id=pid);await state.set_state(AdminState.stock_plan_duration)
-    await call.message.answer("Send plan duration/name (e.g. 1 Hour, 10 Days):");await callback_answer(call, )
+    pid=int(call.data.rsplit(":",1)[1]);await state.update_data(stock_product_id=pid);await state.set_state(AdminState.bulk_plan_input)
+    await call.message.answer(
+        "➕ <b>Add Multiple Plans</b>\n\n"
+        "Send all plans in one message, one plan per line:\n"
+        "<code>3 Hours - 27 | 9\n6 Hours - 54 | 18\n12 Hours - 90 | 30</code>\n\n"
+        "Format: <b>Plan Name - Customer Price | Reseller Price</b> (INR only).\n"
+        "Send /cancel to stop."
+    );await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("ac:plan:"))
 async def ac_plan_detail(call:CallbackQuery):
@@ -1221,6 +1228,51 @@ async def stock_new_plan(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin access required",show_alert=True);return
     await state.set_state(AdminState.stock_plan_duration)
     await call.message.answer("🗓️ <b>New plan</b>\nSend the plan name/duration (example: 1 Month, 3 Months, Lifetime). Send /cancel to stop.");await callback_answer(call, )
+
+@dp.message(AdminState.bulk_plan_input,F.text)
+async def bulk_plan_input(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    data=await state.get_data();product_id=data.get("stock_product_id")
+    parsed=[];errors=[]
+    for line_no,line in enumerate(message.text.splitlines(),1):
+        line=line.strip()
+        if not line:continue
+        try:
+            if "-" not in line or "|" not in line:
+                raise ValueError
+            duration,prices=line.rsplit("-",1)
+            customer_s,reseller_s=prices.split("|",1)
+            duration=duration.strip()
+            customer=float(customer_s.strip().replace("₹",""))
+            reseller=float(reseller_s.strip().replace("₹",""))
+            if not duration or len(duration)>80 or customer<0 or reseller<0:
+                raise ValueError
+            parsed.append((duration,customer,reseller))
+        except (ValueError,TypeError):
+            errors.append(line_no)
+    if not parsed or errors:
+        detail=("Invalid line(s): "+", ".join(map(str,errors))+".\n") if errors else "No valid plan lines found.\n"
+        await message.answer(detail+"Use: <code>3 Hours - 27 | 9</code> (one plan per line). No plans were added.")
+        return
+    created=[]
+    try:
+        for duration,customer,reseller in parsed:
+            pl=await add_plan(product_id,duration,customer,0.0,reseller,0.0)
+            if not pl:raise RuntimeError("Product not found")
+            created.append(pl)
+            await admin_log(message.from_user.id,"PLAN_CREATE",f"{pl['id']} {pl['duration']} product={product_id}")
+        await state.clear()
+        summary="\n".join(f"• {html.escape(pl['duration'])}" for pl in created)
+        await message.answer(
+            f"✅ <b>{len(created)} plan(s) created successfully!</b>\n\n{summary}\n\n"
+            "Now open each plan to upload its keys.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Product",callback_data=f"ac:product:{product_id}")]])
+        )
+    except Exception:
+        log.exception("Bulk plan creation failed")
+        await message.answer(f"⚠️ Created {len(created)} plan(s) before an error. Please check the product plan list before retrying.")
+        await state.clear()
+
 
 @dp.message(AdminState.stock_plan_duration,F.text)
 async def stock_plan_duration(message:Message,state:FSMContext):
