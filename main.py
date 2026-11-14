@@ -84,8 +84,9 @@ def quantity_keyboard(plan_id, product_id):
 def quantity_payment_keyboard(plan_id, quantity, amount, balance):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"✅ Pay with Wallet (₹{amount:.2f}) · Balance ₹{balance:.2f}",callback_data=f"wallet:{plan_id}:{quantity}")],
-        [InlineKeyboardButton(text="💳 Pay with UPI / Paytm (INR)",callback_data=f"upi:{plan_id}:{quantity}")],
-        [InlineKeyboardButton(text="🔙 Change Quantity",callback_data=f"plan:{plan_id}")]])
+        [InlineKeyboardButton(text="💳 Pay with Paytm/UPI (INR)",callback_data=f"upi:{plan_id}:{quantity}")],
+        [InlineKeyboardButton(text="📦 Bulk Purchase",callback_data=f"bulk:{plan_id}")],
+        [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{plan_id}")]])
 
 def topup_amount_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -94,7 +95,7 @@ def topup_amount_keyboard():
         [InlineKeyboardButton(text="🔙 Dashboard",callback_data="home")]])
 
 def category_keyboard(categories):
-    rows=[[InlineKeyboardButton(text=f"{cat['name']} ({cat['count']})",callback_data="category:"+cat['name'])] for cat in categories]
+    rows=[[InlineKeyboardButton(text=cat['name'],callback_data="category:"+cat['name'])] for cat in categories]
     rows.append([InlineKeyboardButton(text="🔙 Back to Menu",callback_data="home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -105,14 +106,13 @@ def product_keyboard(products):
 
 def price_details(p,user):
     reseller=bool(user and user['is_reseller'])
-    shown_usd=p['reseller_price_usd'] if reseller else p['price_usd']
     shown_inr=p['reseller_price_inr'] if reseller else p['price_inr']
     price_label="👑 Reseller Price" if reseller else "🏷️ Price"
     lines=[f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>","━━━━━━━━━━━━━━━━━━",
            "⚡ <b>PRICING & LIVE INVENTORY:</b>",
            f"🔹 {html.escape(p['duration'])}",
-           f"📊 Status: {'✅ In Stock' if p['stock'] else '❌ Out of Stock'}",
-           f"{price_label}: ${shown_usd:.2f} (₹{shown_inr:.2f})",
+           
+           f"{price_label}: ₹{shown_inr:.2f}",
            "━━━━━━━━━━━━━━━━━━","🎯 Select your plan below:"]
     return "\\n".join(lines)
 
@@ -121,9 +121,8 @@ def plan_keyboard(product,user=None):
     rows=[]
     for plan in product['plans']:
         shown_inr=plan['reseller_price_inr'] if reseller else plan['price_inr']
-        shown_usd=plan['reseller_price_usd'] if reseller else plan['price_usd']
         if plan['stock']:
-            rows.append([InlineKeyboardButton(text=f"🔑 [{plan['duration']}] » ${shown_usd:.2f} (₹{shown_inr:.2f})",callback_data=f"plan:{plan['id']}")])
+            rows.append([InlineKeyboardButton(text=f"🔑 [{plan['duration']}] » ₹{shown_inr:.2f}",callback_data=f"plan:{plan['id']}")])
         else:
             rows.append([InlineKeyboardButton(text=f"❌ [{plan['duration']}] — Out of Stock",callback_data=f"outstock:{plan['id']}")])
     rows.append([InlineKeyboardButton(text="🔙 Back to Shop",callback_data="shop")])
@@ -225,12 +224,11 @@ async def product_view(call:CallbackQuery):
         await call.answer("Product not found.",show_alert=True);return
     user=await get_user(call.from_user.id)
     reseller=bool(user and user['is_reseller'])
-    lines=[f"🏪 <b>PANEL ARMY</b>",f"🎮 <b>{html.escape(p['name'])}</b>","━━━━━━━━━━━━━━━━━━","⚡ <b>PRICING & LIVE INVENTORY:</b>"]
+    lines=[f"🏪 <b>PANEL ARMY</b>",f"🎮 <b>{html.escape(p['name'])}</b>","━━━━━━━━━━━━━━━━━━","⚡ <b>AVAILABLE PLANS:</b>"]
     for pl in p['plans']:
         price_inr=pl['reseller_price_inr'] if reseller else pl['price_inr']
-        price_usd=pl['reseller_price_usd'] if reseller else pl['price_usd']
         price_label="👑 Reseller Price" if reseller else "🏷️ Price"
-        lines.extend([f"\\n🔹 {html.escape(pl['duration'])}",f"📊 Status: {'✅ In Stock' if pl['stock'] else '❌ Out of Stock'}",f"{price_label}: ${price_usd:.2f} (₹{price_inr:.2f})"])
+        lines.extend([f"\n🔹 {html.escape(pl['duration'])}",f"{price_label}: ₹{price_inr:.2f}"])
     lines.extend(["━━━━━━━━━━━━━━━━━━","🎯 Select your plan below:"])
     await call.message.edit_text("\n".join(lines),reply_markup=plan_keyboard(p,user));await call.answer()
 
@@ -241,14 +239,23 @@ async def outstock(call:CallbackQuery):await call.answer("This plan is out of st
 async def plan_view(call:CallbackQuery):
     plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
     if not p or p['stock']<1:await call.answer("This plan is out of stock.",show_alert=True);return
-    await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n\n📦 Available Stock: {p['stock']}\n\nSelect purchase quantity:",reply_markup=quantity_keyboard(plan_id,p['product_id']));await call.answer()
+    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit,2)
+    await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n📦 Quantity: <b>1 key</b>\n💰 Total: <b>₹{amount:.2f}</b>\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose a payment method:",reply_markup=quantity_payment_keyboard(plan_id,1,amount,u['wallet_balance'] if u else 0));await call.answer()
+
+@dp.callback_query(F.data.startswith("bulk:"))
+async def bulk_purchase_menu(call:CallbackQuery):
+    plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
+    if not p or p['stock']<1:
+        await call.answer("This plan is currently unavailable.",show_alert=True);return
+    await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n\n📦 Select bulk purchase quantity:",reply_markup=quantity_keyboard(plan_id,p['product_id']))
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("qty:"))
 async def quantity_pick(call:CallbackQuery):
     _,pid_s,qty_s=call.data.split(":");plan_id=int(pid_s);quantity=int(qty_s);p=await get_plan(plan_id)
     if not p or quantity<1 or p['stock']<quantity:await call.answer("Not enough stock for that quantity.",show_alert=True);return
-    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];usd=p['reseller_price_usd'] if reseller else p['price_usd'];amount=round(unit*quantity,2)
-    await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ${usd*quantity:.2f} (₹{amount:.2f})\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0));await call.answer()
+    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit*quantity,2)
+    await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ₹{amount:.2f}\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0));await call.answer()
 
 @dp.callback_query(F.data.startswith("qtycustom:"))
 async def quantity_custom(call:CallbackQuery,state:FSMContext):
@@ -259,9 +266,9 @@ async def quantity_custom_received(message:Message,state:FSMContext):
     try:quantity=int(message.text.strip())
     except Exception:await message.answer("Please send a whole number, for example 25.");return
     data=await state.get_data();plan_id=int(data['custom_plan_id']);await state.clear();p=await get_plan(plan_id)
-    if quantity<1 or not p or quantity>p['stock']:await message.answer(f"Invalid quantity. Available stock: {p['stock'] if p else 0}. Please select the plan again.");return
-    u=await get_user(message.from_user.id);unit=p['reseller_price_inr'] if u and u['is_reseller'] else p['price_inr'];usd=p['reseller_price_usd'] if u and u['is_reseller'] else p['price_usd'];amount=round(unit*quantity,2)
-    await message.answer(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ${usd*quantity:.2f} (₹{amount:.2f})\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0))
+    if quantity<1 or not p or quantity>p['stock']:await message.answer(f"Invalid quantity or insufficient stock. Please select the plan again.");return
+    u=await get_user(message.from_user.id);unit=p['reseller_price_inr'] if u and u['is_reseller'] else p['price_inr'];amount=round(unit*quantity,2)
+    await message.answer(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ₹{amount:.2f}\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0))
 
 async def notify_referral_reward(referred_user_id):
     reward=await award_referral_after_purchase(referred_user_id)
@@ -286,9 +293,13 @@ async def wallet_pay(call:CallbackQuery):
 @dp.callback_query(F.data.startswith("upi:"))
 async def upi_begin(call:CallbackQuery,state:FSMContext):
     # Stop Telegram's callback spinner immediately; Cashfree may take a few seconds.
-    await call.answer("Generating your secure UPI QR…")
+    await call.answer("Request received")
+    progress = await call.message.answer("⏳ Connecting to secure UPI payment gateway…\nPlease wait while your QR is generated.")
     parts=call.data.split(":");plan_id=int(parts[1]);quantity=int(parts[2]) if len(parts)>2 else 1;p=await get_plan(plan_id)
-    if not p or p['stock']<quantity:await call.message.answer("Not enough stock for that quantity.");return
+    if not p or p['stock']<quantity:
+        try: await progress.edit_text("❌ This quantity is currently unavailable. Please choose another quantity.")
+        except Exception: pass
+        return
     user=await get_user(call.from_user.id)
     if not user or not user.get("phone"):
         await call.message.answer("Please restart the bot and share your phone number first.");return
@@ -309,9 +320,13 @@ async def upi_begin(call:CallbackQuery,state:FSMContext):
             qr_image = bio.getvalue()
         caption=(f"💸 <b>{html.escape(payment_title)}</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n🎮 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: {quantity} key(s)\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan this unique QR using any UPI app, including Paytm.\n⚡ Your payment will be verified automatically and your key delivered here.\n⏰ Payment window: 5 minutes.")
         kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}")]])
+        try: await progress.delete()
+        except Exception: pass
         await call.message.answer_photo(BufferedInputFile(qr_image,filename="cashfree_upi_qr.png"),caption=caption,reply_markup=kb)
     except Exception:
         log.exception("Cashfree UPI QR creation failed")
+        try: await progress.edit_text("❌ Could not generate the UPI QR. Please try again.")
+        except Exception: pass
         await expire_order(order['order_id'])
         await call.message.answer("❌ Cashfree could not create the UPI QR for this order. No payment was taken. Please try again or contact support.")
 
@@ -364,7 +379,7 @@ async def orders_cb(call:CallbackQuery):
         for o in rows[:10]:
             key=html.escape(o.get('key_text') or "Pending / not delivered")
             dt=o['created_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('created_at') else "—"
-            chunks.append(f"🎮 <b>{html.escape(o['product_name'])}</b>\n   ⏳ {html.escape(o['duration'])}\n   🔑 <code>{key}</code>\n   💰 ${o['amount_inr']/90:.2f} (₹{o['amount_inr']:.2f}) │ 📅 {dt}\n   📌 Status: {html.escape(o['status'])}\n━━━━━━━━━━━━━━━━━━━━━━")
+            chunks.append(f"🎮 <b>{html.escape(o['product_name'])}</b>\n   ⏳ {html.escape(o['duration'])}\n   🔑 <code>{key}</code>\n   💰 ₹{o['amount_inr']:.2f} │ 📅 {dt}\n   📌 Status: {html.escape(o['status'])}\n━━━━━━━━━━━━━━━━━━━━━━")
         msg="\n".join(chunks)
     await call.message.edit_text(msg,reply_markup=home_keyboard());await call.answer()
 
@@ -373,13 +388,13 @@ async def profile(call:CallbackQuery):
     u=await get_user(call.from_user.id);stats=await user_order_stats(call.from_user.id)
     spent=stats['spent'];orders_count=stats['orders'];balance=u['wallet_balance'] if u else 0;refstats=await referral_stats(call.from_user.id);joined=u['created_at'].strftime("%Y-%m-%d %H:%M:%S") if u and u.get('created_at') else "—"
     role="👑 Reseller" if u and u['is_reseller'] else "🧑‍💼 Customer"
-    msg=("👤 ━━ YOUR PROFILE ━━ 👤\n\n" f"🆔 User ID: <code>{call.from_user.id}</code>\n📛 Name: {html.escape(call.from_user.full_name or 'Customer')}\n👑 Account: {role}\n\n💰 ━ Balance ━\n   💳 Current: ${balance/90:.2f} (₹{balance:.2f})\n\n📊 ━ Statistics ━\n   📦 Orders: {orders_count}\n   💸 Spent: ${spent/90:.2f} (₹{spent:.2f})\n   👥 Referrals: {refstats['total']}\n\n📅 Joined: {joined}")
+    msg=("👤 ━━ YOUR PROFILE ━━ 👤\n\n" f"🆔 User ID: <code>{call.from_user.id}</code>\n📛 Name: {html.escape(call.from_user.full_name or 'Customer')}\n👑 Account: {role}\n\n💰 ━ Balance ━\n   💳 Current: ₹{balance:.2f}\n\n📊 ━ Statistics ━\n   📦 Orders: {orders_count}\n   💸 Spent: ₹{spent:.2f}\n   👥 Referrals: {refstats['total']}\n\n📅 Joined: {joined}")
     await call.message.edit_text(msg,reply_markup=home_keyboard());await call.answer()
 
 @dp.callback_query(F.data=="balance")
 async def balance_menu(call:CallbackQuery):
     u=await get_user(call.from_user.id);balance=u['wallet_balance'] if u else 0
-    msg=("💰 ━━ ADD BALANCE ━━ 💰\n\n" f"💳 Current Balance: ${balance/90:.2f} (₹{balance:.2f})\n\n━━━━━━━━━━━━━━━━━━━━━━\n💳 Available Payment Methods:\n  🇮🇳 Paytm/UPI (INR)\n\n✅ Use balance for purchases!\n━━━━━━━━━━━━━━━━━━━━━━\n\nSelect amount to deposit.\nYou'll choose your payment method next:\n\nMinimum deposit: ₹10")
+    msg=("💰 ━━ ADD BALANCE ━━ 💰\n\n" f"💳 Current Balance: ₹{balance:.2f}\n\n━━━━━━━━━━━━━━━━━━━━━━\n💳 Available Payment Methods:\n  🇮🇳 Paytm/UPI (INR)\n\n✅ Use balance for purchases!\n━━━━━━━━━━━━━━━━━━━━━━\n\nSelect amount to deposit.\nYou'll choose your payment method next:\n\nMinimum deposit: ₹10")
     await call.message.edit_text(msg,reply_markup=topup_amount_keyboard());await call.answer()
 
 @dp.callback_query(F.data=="topup:custom")
@@ -996,7 +1011,7 @@ async def run_webhook_server():
     runner=web.AppRunner(app);await runner.setup();port=int(os.getenv("PORT","8080"));site=web.TCPSite(runner,"0.0.0.0",port);await site.start();log.info("Webhook listening on port %s",port);return runner
 
 async def main():
-    await init_db();await bot.set_my_commands([BotCommand(command="start",description="Open Shop Menu"),BotCommand(command="admin",description="Admin control panel")]);runner=await run_webhook_server()
+    await init_db();await bot.set_my_commands([BotCommand(command="start",description="Open Shop Menu")]);runner=await run_webhook_server()
     try:await dp.start_polling(bot)
     finally:
         await runner.cleanup()
