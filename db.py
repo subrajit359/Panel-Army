@@ -10,14 +10,30 @@ from config import PUBLIC_BASE_URL
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is required. Add Railway PostgreSQL.")
-# Railway often provides postgres://; SQLAlchemy async driver requires postgresql+asyncpg://
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    raise RuntimeError("DATABASE_URL is required. Set it to your Neon PostgreSQL connection string.")
 
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+# Normalize Neon/Railway PostgreSQL URLs for SQLAlchemy's asyncpg driver.
+# asyncpg does not accept libpq's `sslmode` query parameter; configure TLS
+# through connect_args instead.
+from sqlalchemy.engine import make_url
+
+url = make_url(DATABASE_URL)
+if url.drivername in ("postgres", "postgresql"):
+    url = url.set(drivername="postgresql+asyncpg")
+
+query = dict(url.query)
+sslmode = query.pop("sslmode", None)
+query.pop("channel_binding", None)  # libpq-specific; asyncpg does not need this
+query.pop("ssl", None)  # avoid duplicate/conflicting SSL configuration
+url = url.set(query=query)
+
+# Neon requires TLS. Preserve that requirement even if the original URL used
+# `sslmode=require` or omitted an SSL parameter.
+engine = create_async_engine(
+    url,
+    pool_pre_ping=True,
+    connect_args={"ssl": "require"},
+)
 Session = async_sessionmaker(engine, expire_on_commit=False)
 
 class Base(DeclarativeBase): pass
