@@ -17,7 +17,7 @@ async def create_upi_qr_order(order_id: str, amount: float, telegram_user_id: in
         "order_id": order_id, "order_amount": round(float(amount), 2), "order_currency": "INR",
         "customer_details": {"customer_id": f"tg_{telegram_user_id}", "customer_name": (customer_name or "Telegram User")[:100], "customer_phone": phone},
         "order_meta": {"notify_url": f"{PUBLIC_BASE_URL}/cashfree/webhook", "return_url": "https://t.me/"},
-        "order_expiry_time": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="seconds"),
+        "order_expiry_time": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(timespec="seconds"),
         "order_note": f"Panel Army {order_id}",
     }
     timeout=aiohttp.ClientTimeout(total=30)
