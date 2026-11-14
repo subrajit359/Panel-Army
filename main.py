@@ -704,8 +704,12 @@ async def ac_categories(call:CallbackQuery):
 async def show_admin_category_products(target, category):
     products=await list_products(category=category,include_empty=True)
     rows=[[InlineKeyboardButton(text=f"{'🛠️' if p.get('maintenance') else '📦'} {p['name']}",callback_data=f"ac:product:{p['id']}")] for p in products]
-    rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproductcat")],[InlineKeyboardButton(text="⚙️ Manage this category",callback_data="ac:categorymanage_name")],[InlineKeyboardButton(text="🔙 Categories",callback_data="adm:products")]]
-    await target.edit_text(f"📁 <b>{html.escape(category)}</b>\n\n📦 <b>PRODUCTS</b>\nSelect a product or add a new one.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    # Keep Add Product visible even when this category has no products.
+    rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproductcat")],
+             [InlineKeyboardButton(text="⚙️ Manage this category",callback_data="ac:categorymanage_name")],
+             [InlineKeyboardButton(text="🔙 Categories",callback_data="adm:products")]]
+    body=("No products in this category yet.\n\nTap ➕ Add product to create the first product." if not products else "Select a product or add a new one.")
+    await target.edit_text(f"📁 <b>{html.escape(category)}</b>\n\n📦 <b>PRODUCTS</b>\n{body}",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.callback_query(F.data.startswith("ac:category:"))
 async def ac_category_products(call:CallbackQuery,state:FSMContext):
@@ -720,9 +724,12 @@ async def ac_category_products(call:CallbackQuery,state:FSMContext):
 async def ac_add_product_to_category(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
     data=await state.get_data();category=data.get("admin_category")
-    if not category:await callback_answer(call,"Choose a category first.",show_alert=True);return
-    await state.update_data(stock_category=category);await state.set_state(AdminState.stock_product_name)
-    await call.message.edit_text(f"➕ <b>ADD PRODUCT</b>\nCategory: <b>{html.escape(category)}</b>\n\nSend the product name. /cancel to stop.");await callback_answer(call)
+    if not category:
+        await callback_answer(call,"Please open Products and select a category first.",show_alert=True);return
+    await state.update_data(stock_category=category,admin_category=category)
+    await state.set_state(AdminState.stock_product_name)
+    await call.message.edit_text(f"➕ <b>ADD PRODUCT</b>\nCategory: <b>{html.escape(category)}</b>\n\nSend the new product name here. The product will be created inside this category.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to category",callback_data="ac:categoryback")]]))
+    await callback_answer(call,"Send product name")
 
 @dp.callback_query(F.data=="ac:categorymanage_name")
 async def ac_category_manage_selected(call:CallbackQuery,state:FSMContext):
