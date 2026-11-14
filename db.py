@@ -1,5 +1,5 @@
 import os, secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, select, func, text, or_
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -65,6 +65,7 @@ class Product(Base):
     price_inr: Mapped[float] = mapped_column(Numeric(10,2), default=0)  # legacy compatibility
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     category: Mapped[str] = mapped_column(String(100), default="Other Products")
+    maintenance: Mapped[bool] = mapped_column(Boolean, default=False)
 
 class ProductPlan(Base):
     __tablename__ = "product_plans"
@@ -175,6 +176,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_rewarded BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Other Products'",
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS maintenance BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE key_stock ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS duration VARCHAR(80) NOT NULL DEFAULT '1 Day'",
@@ -271,7 +273,7 @@ async def list_products(category=None, include_empty=False):
             if include_empty or stock_count > 0 or product_plans:
                 output.append({
                     "id": p.id, "name": p.name, "description": p.description,
-                    "category": p.category, "stock": stock_count, "plans": product_plans,
+                    "category": p.category, "maintenance": bool(p.maintenance), "stock": stock_count, "plans": product_plans,
                 })
         return output
 
@@ -300,7 +302,7 @@ async def get_product(product_id):
         } for _, pl in rows if pl is not None]
         return {
             "id": product.id, "name": product.name, "description": product.description,
-            "category": product.category, "plans": plans,
+            "category": product.category, "maintenance": bool(product.maintenance), "plans": plans,
         }
 
 async def get_plan(plan_id):
@@ -318,7 +320,7 @@ async def get_plan(plan_id):
         pl, p, stock = row
         return {
             "id": pl.id, "product_id": pl.product_id, "product_name": p.name,
-            "category": p.category, "description": p.description,
+            "category": p.category, "description": p.description, "maintenance": bool(p.maintenance),
             "duration": pl.duration, "price_inr": float(pl.price_inr),
             "price_usd": float(pl.price_usd),
             "reseller_price_inr": float(pl.reseller_price_inr),
@@ -356,6 +358,7 @@ async def pay_wallet(user_id, plan_id, quantity=1):
     pl=await get_plan(plan_id)
     user=await get_user(user_id)
     if not pl or quantity < 1 or quantity > 100: raise ValueError("Invalid plan or quantity (maximum 100)")
+    if pl.get("maintenance"): raise ValueError(f"{pl['product_name']} is under maintenance")
     price=pl["reseller_price_inr"] if user and user["is_reseller"] else pl["price_inr"]
     amount=round(price*quantity,2)
     order_id="PA-"+secrets.token_hex(8).upper()
@@ -563,10 +566,12 @@ async def dashboard_stats():
     async with Session() as s:
         users=int(await s.scalar(select(func.count(User.user_id))) or 0)
         orders=int(await s.scalar(select(func.count(Order.order_id))) or 0)
-        paid=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID")) or 0)
-        revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID")) or 0)
+        paid=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID", Order.payment_method!="TOPUP")) or 0)
+        revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method!="TOPUP")) or 0)
         stock=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.status=="AVAILABLE")) or 0)
-        return {"users":users,"orders":orders,"paid":paid,"revenue":revenue,"stock":stock}
+        india_tz=timezone(timedelta(hours=5, minutes=30)); now=datetime.now(india_tz); today_start=now.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc)
+        today_revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method!="TOPUP", Order.paid_at >= today_start)) or 0)
+        return {"users":users,"orders":orders,"paid":paid,"revenue":revenue,"today_revenue":today_revenue,"stock":stock}
 
 async def search_users(term, limit=15):
     async with Session() as s:
@@ -633,6 +638,12 @@ async def edit_product(product_id, name=None, category=None, description=None):
         if description is not None:p.description=description
         await s.commit();return True
 
+async def set_product_maintenance(product_id, enabled):
+    async with Session() as s:
+        p=await s.get(Product,product_id)
+        if not p:return False
+        p.maintenance=bool(enabled);await s.commit();return True
+
 async def deactivate_product(product_id):
     async with Session() as s:
         p=await s.get(Product,product_id)
@@ -642,8 +653,10 @@ async def deactivate_product(product_id):
         await s.commit();return True
 
 async def create_coupon(code, discount_percent, usage_limit):
+    code=str(code).upper().strip()
+    discount_percent=int(discount_percent); usage_limit=int(usage_limit)
+    if not code or len(code)>40 or not code.replace("-","").replace("_","").isalnum() or not 1<=discount_percent<=100 or usage_limit<0:return False
     async with Session() as s:
-        code=code.upper().strip()
         if await s.get(Coupon,code):return False
         s.add(Coupon(code=code,discount_percent=discount_percent,usage_limit=usage_limit));await s.commit();return True
 
@@ -703,7 +716,7 @@ async def list_keys(plan_id, status=None, limit=50):
 async def admin_all_products():
     async with Session() as s:
         rows=(await s.scalars(select(Product).where(Product.active == True).order_by(Product.category,Product.id))).all()
-        return [{"id":p.id,"name":p.name,"category":p.category,"active":p.active} for p in rows]
+        return [{"id":p.id,"name":p.name,"category":p.category,"active":p.active,"maintenance":bool(p.maintenance)} for p in rows]
 
 async def admin_all_plans(product_id):
     async with Session() as s:
@@ -735,3 +748,51 @@ async def rename_category_admin(old_name,new_name):
 async def category_products_admin(name):
     async with Session() as s:
         return int(await s.scalar(select(func.count(Product.id)).where(Product.category==name)) or 0)
+
+
+async def list_resellers(limit=50):
+    async with Session() as s:
+        rows=(await s.scalars(select(User).where(User.is_reseller==True).order_by(User.created_at.desc()).limit(limit))).all()
+        return [{"user_id":u.user_id,"username":u.username,"full_name":u.full_name,"wallet_balance":float(u.wallet_balance or 0)} for u in rows]
+
+async def list_coupons(limit=50):
+    async with Session() as s:
+        rows=(await s.scalars(select(Coupon).order_by(Coupon.created_at.desc()).limit(limit))).all()
+        return [{"code":c.code,"discount_percent":c.discount_percent,"usage_limit":c.usage_limit,"used_count":c.used_count,"active":c.active} for c in rows]
+
+async def update_coupon(code, active=None, discount_percent=None, usage_limit=None):
+    async with Session() as s:
+        c=await s.get(Coupon,code.upper().strip())
+        if not c:return False
+        if active is not None:c.active=bool(active)
+        if discount_percent is not None:c.discount_percent=int(discount_percent)
+        if usage_limit is not None:c.usage_limit=int(usage_limit)
+        await s.commit();return True
+
+async def delete_coupon(code):
+    async with Session() as s:
+        c=await s.get(Coupon,code.upper().strip())
+        if not c:return False
+        await s.delete(c);await s.commit();return True
+
+async def delete_category_admin(name):
+    async with Session() as s:
+        result=await s.execute(select(Product).where(Product.category==name))
+        rows=result.scalars().all()
+        for product in rows: product.category="Other Products"
+        await s.commit();return len(rows)
+
+
+async def delete_product_admin(product_id):
+    """Hard-delete only products with no historical orders or key records; otherwise archive safely."""
+    async with Session() as s:
+        p=await s.get(Product,product_id)
+        if not p:return "NOT_FOUND"
+        order_count=int(await s.scalar(select(func.count(Order.order_id)).where(Order.product_id==product_id)) or 0)
+        key_count=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.product_id==product_id)) or 0)
+        if order_count or key_count:
+            p.active=False
+            await s.execute(text("UPDATE product_plans SET active=FALSE WHERE product_id=:pid"),{"pid":product_id})
+            await s.commit();return "ARCHIVED"
+        await s.execute(text("DELETE FROM product_plans WHERE product_id=:pid"),{"pid":product_id})
+        await s.delete(p);await s.commit();return "DELETED"

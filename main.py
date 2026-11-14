@@ -17,7 +17,7 @@ from db import (init_db, close_db, is_user_banned, get_or_create_user, list_cate
                 list_orders, get_user, pay_wallet, set_payment_link, expire_order, dashboard_stats, search_users,
                 admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
                 set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
-                set_bot_setting, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats,
+                set_bot_setting, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats, list_resellers, list_coupons, update_coupon, delete_coupon, set_product_maintenance, delete_category_admin, delete_product_admin,
                 attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, rename_category_admin, category_products_admin)
 from cashfree import create_upi_qr_order, fetch_order_payments, verify_webhook_signature, close_cashfree_session
 
@@ -45,6 +45,8 @@ class AdminState(StatesGroup):
     stock_keys=State()
     reward_keys=State()
     admin_input=State()
+    broadcast_collect=State()
+    broadcast_confirm=State()
 
 def is_admin(user_id:int)->bool:return user_id in ADMIN_IDS
 
@@ -58,6 +60,9 @@ def admin_keyboard():
         [InlineKeyboardButton(text="🎟️ Coupons",callback_data="adm:coupons"),InlineKeyboardButton(text="⚙️ Settings",callback_data="adm:settings")],
         [InlineKeyboardButton(text="📜 Admin Logs",callback_data="adm:logs")],
     ])
+
+def admin_nav_rows():
+    return [list(row) for row in admin_keyboard().inline_keyboard]
 
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -259,6 +264,8 @@ async def product_view(call:CallbackQuery):
     product_id=int(call.data.split(":",1)[1]);p=await get_product(product_id)
     if not p:
         await callback_answer(call, "Product not found.",show_alert=True);return
+    if p.get("maintenance"):
+        await call.message.edit_text(f"🛠️ <b>{html.escape(p['name'])} is under maintenance.</b>\nPlease check back later.",reply_markup=home_keyboard()); return
     user=await get_user(call.from_user.id)
     reseller=bool(user and user['is_reseller'])
     lines=[f"🏪 <b>PANEL ARMY</b>",f"🎮 <b>{html.escape(p['name'])}</b>","━━━━━━━━━━━━━━━━━━","⚡ <b>AVAILABLE PLANS:</b>"]
@@ -276,6 +283,8 @@ async def outstock(call:CallbackQuery):await callback_answer(call, "This plan is
 async def plan_view(call:CallbackQuery):
     plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
     if not p:await callback_answer(call, "This plan is unavailable.",show_alert=True);return
+    if p.get("maintenance"):
+        await call.message.edit_text(f"🛠️ <b>{html.escape(p['product_name'])} is under maintenance.</b>\nPlease check back later.",reply_markup=home_keyboard()); return
     u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit,2)
     await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n📦 Quantity: <b>1 key</b>\n💰 Total: <b>₹{amount:.2f}</b>\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose a payment method:",reply_markup=quantity_payment_keyboard(plan_id,1,amount,u['wallet_balance'] if u else 0,p['product_id']));await callback_answer(call, )
 
@@ -284,6 +293,8 @@ async def bulk_purchase_menu(call:CallbackQuery):
     plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
     if not p:
         await callback_answer(call, "This plan is unavailable.",show_alert=True);return
+    if p.get("maintenance"):
+        await callback_answer(call, f"{p['product_name']} is under maintenance.",show_alert=True); return
     await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n\n📦 Select bulk purchase quantity:",reply_markup=quantity_keyboard(plan_id,p['product_id']))
     await callback_answer(call, )
 
@@ -291,6 +302,7 @@ async def bulk_purchase_menu(call:CallbackQuery):
 async def quantity_pick(call:CallbackQuery):
     _,pid_s,qty_s=call.data.split(":");plan_id=int(pid_s);quantity=int(qty_s);p=await get_plan(plan_id)
     if not p or quantity<1 or quantity>100:await callback_answer(call, "Please choose a quantity from 1 to 100.",show_alert=True);return
+    if p.get("maintenance"): await callback_answer(call, f"{p['product_name']} is under maintenance.",show_alert=True); return
     u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit*quantity,2)
     await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ₹{amount:.2f}\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0,p['product_id']));await callback_answer(call, )
 
@@ -305,6 +317,8 @@ async def quantity_custom_received(message:Message,state:FSMContext):
     data=await state.get_data();plan_id=int(data['custom_plan_id']);await state.clear();p=await get_plan(plan_id)
     if quantity < 1 or quantity > 100 or not p:
         await message.answer("Please choose a valid quantity between 1 and 100.");return
+    if p.get("maintenance"):
+        await message.answer(f"🛠️ {html.escape(p['product_name'])} is under maintenance. Please check back later."); return
     u=await get_user(message.from_user.id);unit=p['reseller_price_inr'] if u and u['is_reseller'] else p['price_inr'];amount=round(unit*quantity,2)
     await message.answer(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ₹{amount:.2f}\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0,p['product_id']))
 
@@ -359,6 +373,8 @@ async def upi_begin(call:CallbackQuery,state:FSMContext):
         try: await progress.edit_text("❌ This plan is unavailable. Please choose another plan.")
         except Exception: pass
         return
+    if p.get("maintenance"):
+        await progress.edit_text(f"🛠️ {html.escape(p['product_name'])} is under maintenance. Please check back later."); return
     user=await get_user(call.from_user.id)
     if not user or not user.get("phone"):
         await call.message.answer("Please restart the bot and share your phone number first.");return
@@ -548,10 +564,11 @@ async def admin_help(message:Message):
 @dp.callback_query(F.data.startswith("adm:"))
 async def admin_menu(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin access required.",show_alert=True);return
+    await state.clear()
     section=call.data.split(":",1)[1]
     if section=="dashboard":
         d=await dashboard_stats()
-        msg=("📊 <b>Dashboard</b>\n\n" f"👥 Users: {d['users']}\n📦 Orders: {d['orders']}\n✅ Paid orders: {d['paid']}\n💰 Revenue: ₹{d['revenue']:.2f}\n🔑 Available keys: {d['stock']}")
+        msg=("📊 <b>Dashboard</b>\n\n" f"👥 Users: {d['users']}\n📦 Orders: {d['orders']}\n✅ Paid orders: {d['paid']}\n💰 Revenue: ₹{d['revenue']:.2f}\n📅 Today's revenue: ₹{d['today_revenue']:.2f}\n🔑 Available keys: {d['stock']}")
     elif section=="users":
         await state.set_state(AdminState.search_user)
         msg="👥 <b>User management</b>\nSend a Telegram ID, username, or name to search. Use /cancel to stop."
@@ -560,8 +577,8 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         msg="💰 <b>Wallet control</b>\nSend <code>USER_ID | AMOUNT</code>. Use a positive amount to credit and a negative amount to deduct."
     elif section=="products":
         products=await admin_all_products()
-        rows=[[InlineKeyboardButton(text=f"📦 {p['name']} · {p['category']}",callback_data=f"ac:product:{p['id']}")] for p in products]
-        rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproduct")],[InlineKeyboardButton(text="📁 Manage categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]]
+        rows=[[InlineKeyboardButton(text=f"{'🛠️' if p.get('maintenance') else '📦'} {p['name']} · {p['category']}",callback_data=f"ac:product:{p['id']}")] for p in products]
+        rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproduct")],[InlineKeyboardButton(text="📁 Manage categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
         await call.message.edit_text("📦 <b>PRODUCT & CATEGORY MANAGEMENT</b>\nSelect an item to edit or deactivate it.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, );return
     elif section=="stock":
         rows=await admin_stock_summary()
@@ -570,32 +587,36 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
             [InlineKeyboardButton(text="➕ Add / Update Key Stock",callback_data="stk:start")],
             [InlineKeyboardButton(text="📋 View Products & Plans",callback_data="stk:catalog")],
             [InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")],
-        ])
-        await call.message.answer(msg,reply_markup=kb);await callback_answer(call, );return
+        ] + admin_nav_rows())
+        await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, );return
     elif section=="payments":
         rows=await admin_orders(20)
         msg="💳 <b>PAYMENTS & ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nSelect an order to inspect its payment details.\n\n"+("\n".join(f"• <b>{o['order_id']}</b> · {o['status']} · ₹{o['amount_inr']:.2f}" for o in rows) if rows else "No payment/order records found.")
         pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}")] for o in rows]
-        pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]]
+        pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
         await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows));await callback_answer(call, );return
     elif section=="resellers":
-        await state.set_state(AdminState.admin_input);await state.update_data(admin_action="reseller")
-        msg="👑 <b>Reseller control</b>\nSend the Telegram user ID to toggle reseller access."
+        rows=await list_resellers(50)
+        kb=[[InlineKeyboardButton(text=f"👑 {r['full_name'] or r['user_id']} · {r['user_id']}",callback_data=f"admres:{r['user_id']}:0")] for r in rows]
+        kb += [[InlineKeyboardButton(text="➕ Add reseller",callback_data="admres:add")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:resellers")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        await call.message.edit_text("👑 <b>RESELLER MANAGEMENT</b>\nTap a reseller to remove access, or add a user by Telegram ID.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback_answer(call); return
     elif section=="broadcast":
-        await state.set_state(AdminState.broadcast);await state.update_data(audience="all")
-        msg="📢 <b>Broadcast to all users</b>\nSend the message to broadcast."
+        kb=[[InlineKeyboardButton(text="👥 All users",callback_data="bc:all")],[InlineKeyboardButton(text="🛍️ Customers",callback_data="bc:customers")],[InlineKeyboardButton(text="👑 Resellers",callback_data="bc:resellers")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        await call.message.edit_text("📢 <b>BROADCAST</b>\nChoose who should receive your messages.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback_answer(call); return
     elif section=="coupons":
-        await state.set_state(AdminState.admin_input);await state.update_data(admin_action="coupon")
-        msg="🎟️ <b>Create coupon</b>\nSend <code>CODE | DISCOUNT_PERCENT | USAGE_LIMIT</code>. Use 0 for unlimited. Note: coupon storage exists; checkout redemption is not enabled in this project."
+        coupons=await list_coupons()
+        rows=[[InlineKeyboardButton(text=f"{'🟢' if c['active'] else '⏸️'} {c['code']} · {c['discount_percent']}% · {c['used_count']}/{c['usage_limit'] or '∞'}",callback_data=f"cp:view:{c['code']}")] for c in coupons]
+        rows += [[InlineKeyboardButton(text="➕ Create coupon",callback_data="cp:create")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:coupons")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        await call.message.edit_text("🎟️ <b>COUPON MANAGEMENT</b>\nSelect a coupon to edit, pause or delete.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); await callback_answer(call); return
     elif section=="settings":
         settings=await get_bot_settings()
-        msg="⚙️ <b>Bot settings</b>\n"+ ("\n".join(f"• {html.escape(str(k))}: {html.escape(str(v))}" for k,v in settings.items()) if settings else "No custom settings saved.")
-        msg+="\n\nTo change a setting, send KEY | VALUE."
-        await state.set_state(AdminState.admin_input);await state.update_data(admin_action="setting")
+        rows=[[InlineKeyboardButton(text=f"⚙️ {k[:25]}: {v[:20]}",callback_data=f"setting:edit:{k}")] for k,v in settings.items()]
+        rows += [[InlineKeyboardButton(text="➕ Add / change setting",callback_data="setting:add")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:settings")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        await call.message.edit_text("⚙️ <b>BOT SETTINGS</b>\nSelect a saved setting or add a key/value setting.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); await callback_answer(call); return
     elif section=="logs":
         rows=await recent_admin_logs(20);msg="📜 <b>Recent admin actions</b>\n"+("\n".join(f"{r['created_at']:%Y-%m-%d %H:%M} · {r['admin_id']} · {r['action']} · {html.escape(r['details'][:120])}" for r in rows) if rows else "No admin actions logged yet.")
     else:msg="Unknown section."
-    await call.message.answer(msg,reply_markup=admin_keyboard());await callback_answer(call, )
+    await call.message.edit_text(msg,reply_markup=admin_keyboard());await callback_answer(call, )
 
 
 @dp.callback_query(F.data=="admpay:list")
@@ -605,7 +626,7 @@ async def admin_payments_list(call:CallbackQuery):
     rows=await admin_orders(20)
     msg="💳 <b>PAYMENTS & ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nSelect an order to inspect its payment details.\n\n"+("\n".join(f"• <b>{o['order_id']}</b> · {o['status']} · ₹{o['amount_inr']:.2f}" for o in rows) if rows else "No payment/order records found.")
     pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}")] for o in rows]
-    pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]]
+    pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
     await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows));await callback_answer(call, "Payments refreshed")
 
 @dp.callback_query(F.data.startswith("admpay:view:"))
@@ -622,7 +643,7 @@ async def admin_payment_detail(call:CallbackQuery):
          f"💰 Amount: <b>₹{o['amount_inr']:.2f}</b>\n📌 Status: <b>{html.escape(o['status'])}</b>\n"
          f"🏦 Method: {html.escape(o['payment_method'])}\n📅 Created: {dt}\n"
          f"🔑 Key: <code>{html.escape(o.get('key_text') or 'Not delivered / wallet top-up')}</code>")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh status list",callback_data="admpay:list")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh status list",callback_data="admpay:list")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows())
     await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, )
 
 @dp.message(AdminState.search_user,F.text)
@@ -655,17 +676,28 @@ async def admin_ban_toggle(call:CallbackQuery):
         await admin_log(call.from_user.id,"USER_BAN" if int(enabled) else "USER_UNBAN",uid)
     await callback_answer(call, "Updated" if ok else "User not found",show_alert=True)
 
+@dp.callback_query(F.data=="admres:add")
+async def reseller_add_button(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    await state.set_state(AdminState.admin_input); await state.update_data(admin_action="reseller")
+    await call.message.answer("Send the Telegram user ID to grant reseller access."); await callback_answer(call)
+
 @dp.callback_query(F.data.startswith("admres:"))
 async def admin_res_toggle(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
-    _,uid,enabled=call.data.split(":");await set_reseller(int(uid),bool(int(enabled)));await admin_log(call.from_user.id,"RESELLER_TOGGLE",f"{uid}={enabled}");await callback_answer(call, "Reseller status updated",show_alert=True)
+    _,uid,enabled=call.data.split(":");ok=await set_reseller(int(uid),bool(int(enabled)));await admin_log(call.from_user.id,"RESELLER_TOGGLE",f"{uid}={enabled}")
+    rows=await list_resellers(50)
+    kb=[[InlineKeyboardButton(text=f"👑 {r['full_name'] or r['user_id']} · {r['user_id']}",callback_data=f"admres:{r['user_id']}:0")] for r in rows]
+    kb += [[InlineKeyboardButton(text="➕ Add reseller",callback_data="admres:add")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:resellers")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+    await call.message.edit_text("👑 <b>RESELLER MANAGEMENT</b>\nTap a reseller to remove access, or add a user by Telegram ID.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback_answer(call, "Reseller status updated" if ok else "User not found",show_alert=True)
 
 @dp.callback_query(F.data=="ac:categories")
 async def ac_categories(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     products=await admin_all_products();cats=sorted({p["category"] for p in products})
     rows=[[InlineKeyboardButton(text=f"📁 {c}",callback_data="ac:category:"+str(i))] for i,c in enumerate(cats)]
-    rows.append([InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")])
+    rows.append([InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]); rows += admin_nav_rows()
     await call.message.edit_text("📁 <b>Categories</b>\nSelect a category to rename or move its products.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
     # Store names per admin in FSM is not needed: callback index resolves from fresh sorted list.
 
@@ -677,7 +709,7 @@ async def ac_category_detail(call:CallbackQuery,state:FSMContext):
     except (ValueError,IndexError):await callback_answer(call, "Category list changed. Refresh.",show_alert=True);return
     count=await category_products_admin(name)
     await state.update_data(category_name=name)
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete")],[InlineKeyboardButton(text="🔙 Categories",callback_data="ac:categories")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete")],[InlineKeyboardButton(text="🔙 Categories",callback_data="ac:categories")]] + admin_nav_rows())
     await call.message.edit_text(f"📁 <b>{html.escape(name)}</b>\nProducts: {count}\nDelete safely moves its products to Other Products; it does not delete sold order history.",reply_markup=kb);await callback_answer(call, )
 
 @dp.callback_query(F.data=="ac:categoryrename")
@@ -691,9 +723,9 @@ async def ac_category_delete(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     d=await state.get_data();old=d.get("category_name")
     if not old:await callback_answer(call, "Select category again.",show_alert=True);return
-    ok=await rename_category_admin(old,"Other Products")
+    ok=bool(await delete_category_admin(old))
     await admin_log(call.from_user.id,"CATEGORY_DELETE_MOVE",old)
-    await call.message.edit_text("✅ Category removed. Its products were moved to Other Products." if ok else "Category not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📁 Categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]]));await callback_answer(call, )
+    await call.message.edit_text("✅ Category removed. Its products were moved to Other Products." if ok else "Category not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📁 Categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("ac:product:"))
 async def ac_product_detail(call:CallbackQuery):
@@ -702,8 +734,22 @@ async def ac_product_detail(call:CallbackQuery):
     if not p:await callback_answer(call, "Product not found or inactive",show_alert=True);return
     plans=await admin_all_plans(pid)
     rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}")] for pl in plans]
-    rows += [[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Deactivate product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]]
-    await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nCategory: {html.escape(p['category'])}\nChoose a plan or action:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
+    rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]] + admin_nav_rows()
+    await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nCategory: {html.escape(p['category'])}\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nChoose a plan or action:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
+
+@dp.callback_query(F.data.startswith("ac:maintenance:"))
+async def ac_product_maintenance(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    _,_,pid_s,enabled_s=call.data.split(":"); pid=int(pid_s); enabled=bool(int(enabled_s))
+    ok=await set_product_maintenance(pid,enabled)
+    if ok: await admin_log(call.from_user.id,"PRODUCT_MAINTENANCE",f"{pid}={enabled}")
+    p=await get_product(pid)
+    if p:
+        plans=await admin_all_plans(pid)
+        rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}")] for pl in plans]
+        rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]] + admin_nav_rows()
+        await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nCategory: {html.escape(p['category'])}",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback_answer(call,"Updated")
 
 @dp.callback_query(F.data.startswith("ac:editname:"))
 async def ac_editname(call:CallbackQuery,state:FSMContext):
@@ -720,9 +766,17 @@ async def ac_editcat(call:CallbackQuery,state:FSMContext):
 @dp.callback_query(F.data.startswith("ac:deleteproduct:"))
 async def ac_deleteproduct(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
-    pid=int(call.data.rsplit(":",1)[1]);ok=await deactivate_product(pid)
-    if ok:await admin_log(call.from_user.id,"PRODUCT_DEACTIVATE",str(pid))
-    await call.message.edit_text("✅ Product and plans deactivated. Existing order records remain." if ok else "Product not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Products",callback_data="adm:products")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]]));await callback_answer(call, )
+    pid=int(call.data.rsplit(":",1)[1])
+    await call.message.edit_text("⚠️ <b>Confirm product deletion</b>\nIf this product has orders or key inventory, it will be safely archived so historical records are not damaged. Otherwise it will be permanently deleted.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑️ Confirm delete",callback_data=f"ac:deleteconfirm:{pid}")],[InlineKeyboardButton(text="↩ Cancel",callback_data=f"ac:product:{pid}")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]])); await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("ac:deleteconfirm:"))
+async def ac_deleteproduct_confirm(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    pid=int(call.data.rsplit(":",1)[1]); result=await delete_product_admin(pid)
+    if result!="NOT_FOUND": await admin_log(call.from_user.id,"PRODUCT_"+result,str(pid))
+    msg={"DELETED":"✅ Product permanently deleted from the database.","ARCHIVED":"✅ Product archived because it has keys or order history. Existing records are preserved.","NOT_FOUND":"Product not found."}.get(result,"Could not delete product.")
+    await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Products",callback_data="adm:products")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows())); await callback_answer(call)
+
 
 @dp.callback_query(F.data.startswith("ac:addplan:"))
 async def ac_addplan(call:CallbackQuery,state:FSMContext):
@@ -735,7 +789,7 @@ async def ac_plan_detail(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     pid=int(call.data.rsplit(":",1)[1]);pl=await get_plan(pid)
     if not pl:await callback_answer(call, "Plan not found",show_alert=True);return
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Edit plan & INR prices",callback_data=f"ac:planedit:{pid}")],[InlineKeyboardButton(text="🔑 Add keys to this plan",callback_data=f"stk:plan:{pid}")],[InlineKeyboardButton(text="🗑️ Deactivate plan",callback_data=f"ac:plandelete:{pid}")],[InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{pl['product_id']}")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Edit plan & INR prices",callback_data=f"ac:planedit:{pid}")],[InlineKeyboardButton(text="🔑 Add keys to this plan",callback_data=f"stk:plan:{pid}")],[InlineKeyboardButton(text="🗑️ Deactivate plan",callback_data=f"ac:plandelete:{pid}")],[InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{pl['product_id']}")]] + admin_nav_rows())
     await call.message.edit_text(f"🗓️ <b>{html.escape(pl['duration'])}</b>\nCustomer: ₹{pl['price_inr']:.2f}\nReseller: ₹{pl['reseller_price_inr']:.2f}\nAvailable keys: {pl['stock']}",reply_markup=kb);await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("ac:planedit:"))
@@ -749,13 +803,130 @@ async def ac_plan_delete(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     pid=int(call.data.rsplit(":",1)[1]);ok=await deactivate_plan_admin(pid)
     if ok:await admin_log(call.from_user.id,"PLAN_DEACTIVATE",str(pid))
-    await call.message.edit_text("✅ Plan deactivated. Historical orders are preserved." if ok else "Plan not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]]));await callback_answer(call, )
+    await call.message.edit_text("✅ Plan deactivated. Historical orders are preserved." if ok else "Plan not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()));await callback_answer(call, )
 
 @dp.callback_query(F.data=="ac:addproduct")
 async def ac_addproduct(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     await state.update_data(stock_category="Other Products");await state.set_state(AdminState.stock_product_name)
     await call.message.answer("Send product name. You can change its category after creation.");await callback_answer(call, )
+
+@dp.callback_query(F.data=="cp:create")
+async def coupon_create_start(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    await state.set_state(AdminState.admin_input); await state.update_data(admin_action="coupon")
+    await call.message.answer("Send CODE | DISCOUNT_PERCENT | USAGE_LIMIT (0 = unlimited)."); await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("cp:view:"))
+async def coupon_view(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    code=call.data.split(":",2)[2]; c=next((x for x in await list_coupons(100) if x['code']==code),None)
+    if not c: await callback_answer(call,"Coupon not found",show_alert=True); return
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=("⏸️ Pause coupon" if c['active'] else "▶️ Activate coupon"),callback_data=f"cp:toggle:{code}")],[InlineKeyboardButton(text="✏️ Edit discount / limit",callback_data=f"cp:edit:{code}")],[InlineKeyboardButton(text="🗑️ Delete coupon",callback_data=f"cp:delete:{code}")],[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons")]] + admin_nav_rows())
+    await call.message.edit_text(f"🎟️ <b>{html.escape(code)}</b>\nDiscount: {c['discount_percent']}%\nUsage: {c['used_count']}/{c['usage_limit'] or 'Unlimited'}\nStatus: {'Active' if c['active'] else 'Paused'}",reply_markup=kb); await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("cp:toggle:"))
+async def coupon_toggle(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    code=call.data.split(":",2)[2]; c=next((x for x in await list_coupons(100) if x['code']==code),None)
+    ok=await update_coupon(code,active=not c['active']) if c else False
+    await callback_answer(call,"Coupon updated" if ok else "Coupon not found");
+    if ok: await coupon_view_refresh(call)
+
+async def coupon_view_refresh(call):
+    code=call.data.split(":",2)[2]; c=next((x for x in await list_coupons(100) if x['code']==code),None)
+    if c: await call.message.edit_text(f"🎟️ <b>{html.escape(code)}</b>\nDiscount: {c['discount_percent']}%\nUsage: {c['used_count']}/{c['usage_limit'] or 'Unlimited'}\nStatus: {'Active' if c['active'] else 'Paused'}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=("⏸️ Pause coupon" if c['active'] else "▶️ Activate coupon"),callback_data=f"cp:toggle:{code}")],[InlineKeyboardButton(text="✏️ Edit discount / limit",callback_data=f"cp:edit:{code}")],[InlineKeyboardButton(text="🗑️ Delete coupon",callback_data=f"cp:delete:{code}")],[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons")]] + admin_nav_rows()))
+
+@dp.callback_query(F.data.startswith("cp:edit:"))
+async def coupon_edit_start(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    code=call.data.split(":",2)[2]; await state.set_state(AdminState.admin_input); await state.update_data(admin_action="coupon_edit",coupon_code=code)
+    await call.message.answer("Send NEW_DISCOUNT_PERCENT | NEW_USAGE_LIMIT (0 = unlimited)."); await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("cp:delete:"))
+async def coupon_delete(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    code=call.data.split(":",2)[2]; ok=await delete_coupon(code); await admin_log(call.from_user.id,"COUPON_DELETE",code)
+    await call.message.edit_text("✅ Coupon deleted." if ok else "Coupon not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟️ Coupons",callback_data="adm:coupons")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows())); await callback_answer(call)
+
+@dp.callback_query(F.data=="setting:add")
+async def setting_add_start(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    await state.set_state(AdminState.admin_input); await state.update_data(admin_action="setting")
+    await call.message.answer("Send SETTING_KEY | VALUE."); await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("setting:edit:"))
+async def setting_edit_start(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    key=call.data.split(":",2)[2]; await state.set_state(AdminState.admin_input); await state.update_data(admin_action="setting_value",setting_key=key)
+    await call.message.answer(f"Send the new value for <code>{html.escape(key)}</code>."); await callback_answer(call)
+
+@dp.callback_query(F.data.in_({"bc:all","bc:customers","bc:resellers"}))
+async def broadcast_audience(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    audience=call.data.split(":",1)[1]; await state.update_data(audience=audience,broadcast_items=[]); await state.set_state(AdminState.broadcast_collect)
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Finish & Preview",callback_data="bc:finish")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel")]])
+    await call.message.edit_text(f"📢 <b>Broadcast to {audience}</b>\nNow send text, photo, video or other Telegram messages one by one. Use Add another after each message; Finish when ready.",reply_markup=kb); await callback_answer(call)
+
+@dp.message(AdminState.broadcast_collect)
+async def broadcast_collect_message(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text and message.text.strip().lower() in {"/cancel","cancel"}:
+        await state.clear(); await message.answer("Broadcast cancelled.",reply_markup=admin_keyboard()); return
+    d=await state.get_data(); items=d.get("broadcast_items",[])
+    items.append({"chat_id":message.chat.id,"message_id":message.message_id})
+    await state.update_data(broadcast_items=items)
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add another message",callback_data="bc:more")],[InlineKeyboardButton(text="✅ Finish & Preview",callback_data="bc:finish")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel")]])
+    await message.answer(f"✅ Message {len(items)} added to broadcast. Add more or finish.",reply_markup=kb)
+
+@dp.callback_query(F.data=="bc:more")
+async def broadcast_more(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    await call.message.answer("Send the next broadcast message."); await callback_answer(call)
+
+@dp.callback_query(F.data=="bc:finish")
+async def broadcast_finish(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    d=await state.get_data(); items=d.get("broadcast_items",[])
+    if not items: await callback_answer(call,"Add at least one message first",show_alert=True); return
+    await state.set_state(AdminState.broadcast_confirm)
+    await call.message.edit_text(f"📢 <b>Confirm broadcast</b>\nAudience: {d.get('audience','all')}\nMessages: {len(items)}\nSend these messages to the selected audience?",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Send broadcast",callback_data="bc:send")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel")]] + admin_nav_rows())); await callback_answer(call)
+
+@dp.callback_query(F.data=="bc:cancel")
+async def broadcast_cancel(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    await state.clear(); await call.message.edit_text("Broadcast cancelled.",reply_markup=admin_keyboard()); await callback_answer(call)
+
+@dp.callback_query(F.data=="bc:send")
+async def broadcast_send(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    from db import broadcast_user_ids
+    d=await state.get_data(); audience=d.get("audience","all"); items=d.get("broadcast_items",[])
+    if audience=="resellers": ids=await broadcast_user_ids(resellers=True)
+    elif audience=="customers": ids=await broadcast_user_ids(resellers=False)
+    else: ids=await broadcast_user_ids(resellers=False)
+    if audience=="customers":
+        from db import Session, User
+        from sqlalchemy import select
+        async with Session() as session: ids=list((await session.scalars(select(User.user_id).where(User.is_banned==False,User.is_reseller==False))).all())
+    sent=failed=0
+    await callback_answer(call,"Broadcast started")
+    for uid in ids:
+        ok=True
+        for item in items:
+            try: await bot.copy_message(uid,item["chat_id"],item["message_id"])
+            except Exception as exc:
+                retry_after=getattr(exc,"retry_after",None)
+                if retry_after:
+                    await asyncio.sleep(float(retry_after)+0.5)
+                    try: await bot.copy_message(uid,item["chat_id"],item["message_id"])
+                    except Exception: ok=False
+                else: ok=False
+        if ok: sent+=1
+        else: failed+=1
+        await asyncio.sleep(0.04)
+    await state.clear(); await admin_log(call.from_user.id,"BROADCAST",f"audience={audience}, messages={len(items)}, sent={sent}, failed={failed}")
+    await call.message.edit_text(f"✅ Broadcast complete\nMessages: {len(items)}\nUsers reached: {sent}\nFailed: {failed}",reply_markup=admin_keyboard())
 
 @dp.message(AdminState.admin_input,F.text)
 async def admin_button_input(message:Message,state:FSMContext):
@@ -791,24 +962,23 @@ async def admin_button_input(message:Message,state:FSMContext):
             await message.answer("✅ Plan updated." if ok else "Plan not found.",reply_markup=admin_keyboard())
         elif action=="setting":
             key,value=[x.strip() for x in raw.split("|",1)]
-            if not key:raise ValueError
+            if not key or len(key)>80 or len(value)>1000:raise ValueError
             await set_bot_setting(key.lower(),value);await admin_log(message.from_user.id,"SETTING_UPDATE",key.lower())
             await message.answer("✅ Setting saved.",reply_markup=admin_keyboard())
+        elif action=="coupon_edit":
+            discount,limit=[x.strip() for x in raw.split("|",1)]
+            discount=int(discount); limit=int(limit)
+            if not 1<=discount<=100 or limit<0: raise ValueError
+            ok=await update_coupon(data["coupon_code"],discount_percent=discount,usage_limit=limit)
+            await message.answer("✅ Coupon updated." if ok else "Coupon not found.",reply_markup=admin_keyboard())
+        elif action=="setting_value":
+            key=data.get("setting_key")
+            if not key or len(raw)>1000:raise ValueError
+            await set_bot_setting(key,raw);await admin_log(message.from_user.id,"SETTING_UPDATE",key)
+            await message.answer("✅ Setting updated.",reply_markup=admin_keyboard())
         await state.clear()
     except (ValueError,TypeError):
         await message.answer("Invalid format. Please try again using the format shown above.")
-
-@dp.message(AdminState.broadcast,F.text)
-async def admin_broadcast(message:Message,state:FSMContext):
-    if not is_admin(message.from_user.id):return
-    from db import broadcast_user_ids
-    data=await state.get_data();audience=data.get("audience","all")
-    ids=await broadcast_user_ids(resellers=(audience=="resellers"));sent=failed=0
-    for uid in ids:
-        try:await bot.send_message(uid,html.escape(message.text));sent+=1
-        except Exception:failed+=1
-    await state.clear();await admin_log(message.from_user.id,"BROADCAST",f"audience={audience}, sent={sent}, failed={failed}")
-    await message.answer(f"Broadcast complete. Sent: {sent}; failed: {failed}.",reply_markup=admin_keyboard())
 
 # Guided, button-first stock and catalogue management
 
@@ -1015,7 +1185,7 @@ async def stock_receive_keys(message:Message,state:FSMContext):
 @dp.callback_query(F.data=="stk:admin")
 async def stock_back_admin(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin access required",show_alert=True);return
-    await state.clear();await call.message.answer("⚔️ <b>Admin Control</b>",reply_markup=admin_keyboard());await callback_answer(call, )
+    await state.clear();await call.message.edit_text("⚔️ <b>Admin Control</b>\nChoose a management section:",reply_markup=admin_keyboard());await callback_answer(call, )
 
 @dp.callback_query(F.data=="stk:cancel")
 async def stock_flow_cancel(call:CallbackQuery,state:FSMContext):
@@ -1217,8 +1387,8 @@ async def admin_refunds(message:Message):
 @dp.message(Command("broadcast_resellers"))
 async def broadcast_resellers_start(message:Message,state:FSMContext):
     if not is_admin(message.from_user.id):return
-    await state.update_data(audience="resellers");await state.set_state(AdminState.broadcast)
-    await message.answer("Send the message to broadcast to active resellers.")
+    await state.update_data(audience="resellers",broadcast_items=[]);await state.set_state(AdminState.broadcast_collect)
+    await message.answer("Send the first message for the reseller broadcast. Then use Add another / Finish buttons.")
 
 async def run_webhook_server():
     from aiohttp import web
