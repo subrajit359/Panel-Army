@@ -254,6 +254,28 @@ async def fulfill_paid_order(order_id):
                 return {"key_text":None,"user_id":order.user_id}
             return result
 
+
+async def credit_wallet_for_no_stock(order_id):
+    """Credit a successful Cashfree payment to the buyer's wallet exactly once."""
+    async with Session() as s:
+        async with s.begin():
+            order=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
+            if not order:
+                return None
+            if order.status=="REFUNDED":
+                return {"credited":False,"user_id":order.user_id,"amount":float(order.amount_inr)}
+            if order.status!="PAID_NO_STOCK":
+                return {"credited":False,"user_id":order.user_id,"amount":float(order.amount_inr)}
+            user=await s.scalar(select(User).where(User.user_id==order.user_id).with_for_update())
+            if not user:
+                raise ValueError(f"Cannot refund order {order_id}: user does not exist")
+            amount=round(float(order.amount_inr),2)
+            user.wallet_balance=round(float(user.wallet_balance or 0)+amount,2)
+            s.add(WalletTransaction(user_id=order.user_id,amount=amount,kind="CREDIT",
+                                    note=f"Automatic no-stock refund {order_id}",admin_id=None))
+            order.status="REFUNDED"
+            return {"credited":True,"user_id":order.user_id,"amount":amount}
+
 async def add_product(name, price, description, category="Other Products"):
     async with Session() as s:
         p=Product(name=name,price_inr=price,description=description,category=category)
@@ -311,8 +333,8 @@ async def dashboard_stats():
     async with Session() as s:
         users=int(await s.scalar(select(func.count(User.user_id))) or 0)
         orders=int(await s.scalar(select(func.count(Order.order_id))) or 0)
-        paid=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status.in_(["PAID","PAID_NO_STOCK"]))) or 0)
-        revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status.in_(["PAID","PAID_NO_STOCK"]))) or 0)
+        paid=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID")) or 0)
+        revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID")) or 0)
         stock=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.status=="AVAILABLE")) or 0)
         return {"users":users,"orders":orders,"paid":paid,"revenue":revenue,"stock":stock}
 
@@ -331,7 +353,7 @@ async def admin_user(user_id):
         u=await s.get(User,user_id)
         if not u:return None
         count=int(await s.scalar(select(func.count(Order.order_id)).where(Order.user_id==user_id)) or 0)
-        spent=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.user_id==user_id,Order.status.in_(["PAID","PAID_NO_STOCK"]))) or 0)
+        spent=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.user_id==user_id,Order.status=="PAID")) or 0)
         return {"user_id":u.user_id,"username":u.username,"full_name":u.full_name,"wallet_balance":float(u.wallet_balance or 0),"is_banned":u.is_banned,"is_reseller":u.is_reseller,"orders":count,"spent":spent,"created_at":u.created_at}
 
 async def set_banned(user_id, enabled):
