@@ -240,12 +240,18 @@ async def upi_begin(call:CallbackQuery,state:FSMContext):
     try:
         payment=await create_upi_qr_order(order['order_id'],amount,call.from_user.id,call.from_user.full_name or f"user{call.from_user.id}",user['phone'])
         await set_payment_link(order['order_id'],payment['cashfree_order_id'])
-        qr=qrcode.QRCode(box_size=8,border=3);qr.add_data(payment['qr_value']);qr.make(fit=True)
-        image=qr.make_image(fill_color="black",back_color="white")
-        bio=BytesIO();image.save(bio,format="PNG");bio.seek(0)
+        if payment.get("qr_image_bytes"):
+            # Cashfree supplied the rendered QR image; send it directly.
+            qr_image = payment["qr_image_bytes"]
+        else:
+            # Compatibility with Cashfree responses that return a UPI URI.
+            qr=qrcode.QRCode(box_size=8,border=3);qr.add_data(payment['qr_value']);qr.make(fit=True)
+            image=qr.make_image(fill_color="black",back_color="white")
+            bio=BytesIO();image.save(bio,format="PNG");bio.seek(0)
+            qr_image = bio.getvalue()
         caption=(f"💸 <b>Cashfree UPI Payment</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n🎮 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: 1 key\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan this unique QR using any UPI app.\n⚡ Your payment will be verified automatically and your key delivered here.\n⏰ Payment window: 5 minutes.")
         kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}")]])
-        await call.message.answer_photo(BufferedInputFile(bio.getvalue(),filename="cashfree_upi_qr.png"),caption=caption,reply_markup=kb)
+        await call.message.answer_photo(BufferedInputFile(qr_image,filename="cashfree_upi_qr.png"),caption=caption,reply_markup=kb)
     except Exception:
         log.exception("Cashfree UPI QR creation failed")
         await expire_order(order['order_id'])
