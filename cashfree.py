@@ -2,6 +2,7 @@ import aiohttp
 import hmac
 import hashlib
 import base64
+from datetime import datetime, timedelta, timezone
 from config import CASHFREE_APP_ID, CASHFREE_SECRET_KEY, CASHFREE_ENV, PUBLIC_BASE_URL
 
 API_BASE = "https://sandbox.cashfree.com/pg" if CASHFREE_ENV == "sandbox" else "https://api.cashfree.com/pg"
@@ -26,6 +27,7 @@ async def create_payment_link(order_id: str, amount: float, telegram_user_id: in
             "customer_phone": phone,
         },
         "link_partial_payments": False,
+        "link_expiry_time": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="seconds"),
         "link_notify": {"send_sms": False, "send_email": False},
         "link_auto_reminders": False,
         "link_meta": {
