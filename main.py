@@ -30,8 +30,13 @@ class CheckoutState(StatesGroup):
 class AdminState(StatesGroup):
     search_user=State()
     broadcast=State()
+    stock_category_name=State()
+    stock_product_name=State()
+    stock_product_description=State()
+    stock_plan_duration=State()
+    stock_plan_prices=State()
+    stock_keys=State()
 
-pending_stock={}
 def is_admin(user_id:int)->bool:return user_id in ADMIN_IDS
 
 def admin_keyboard():
@@ -274,7 +279,14 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
     elif section=="wallet":msg="💰 <b>Wallet management</b>\nUse /walletadjust USER_ID|AMOUNT (negative amount deducts).\nUse /wallethistory USER_ID to view transactions."
     elif section=="products":msg="📦 <b>Product management</b>\n/addproduct CATEGORY|NAME|DESCRIPTION\n/editproduct ID|NAME|CATEGORY|DESCRIPTION\n/deleteproduct ID\n/addplan PRODUCT_ID|DURATION|PRICE_INR|PRICE_USD|RESELLER_INR|RESELLER_USD"
     elif section=="stock":
-        rows=await admin_stock_summary();msg="🔑 <b>Key stock</b>\n"+ ("\n".join(f"Plan {r['plan_id']}: {r['status']} — {r['count']}" for r in rows) if rows else "No stock records")+"\n\n/addstock PLAN_ID then send keys. /keys PLAN_ID|STATUS (optional) lists key IDs/status. /stockstatus KEY_ID|AVAILABLE or SOLD or EXPIRED"
+        rows=await admin_stock_summary()
+        msg="🔑 <b>Key stock & inventory</b>\n\nChoose a guided action below. You can select an existing category, product and plan, or create any missing item without typing commands.\n\n"+("\n".join(f"Plan {r['plan_id']}: {r['status']} — {r['count']}" for r in rows) if rows else "No stock records yet.")
+        kb=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Add / Update Key Stock",callback_data="stk:start")],
+            [InlineKeyboardButton(text="📋 View Products & Plans",callback_data="stk:catalog")],
+            [InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")],
+        ])
+        await call.message.answer(msg,reply_markup=kb);await call.answer();return
     elif section=="payments":
         rows=await admin_orders(15);msg="💳 <b>Recent payments/orders</b>\n"+("\n".join(f"{o['order_id']} · {o['status']} · ₹{o['amount_inr']:.2f} · {o['payment_method']} · user {o['user_id']}" for o in rows) if rows else "No orders")+"\n\n/refundrecord ORDER_ID|STATUS|NOTE tracks refund progress; initiate the actual refund in Cashfree dashboard."
     elif section=="resellers":msg="👑 <b>Reseller management</b>\n/setreseller USER_ID — activate\n/unreseller USER_ID — deactivate\n/resellerprice PLAN_ID|INR|USD — set reseller price"
@@ -333,6 +345,193 @@ async def admin_broadcast(message:Message,state:FSMContext):
     await state.clear();await admin_log(message.from_user.id,"BROADCAST",f"audience={audience}, sent={sent}, failed={failed}")
     await message.answer(f"Broadcast complete. Sent: {sent}; failed: {failed}.",reply_markup=admin_keyboard())
 
+# Guided, button-first stock and catalogue management
+
+def stock_category_keyboard(categories):
+    rows=[]
+    for i,cat in enumerate(categories):
+        rows.append([InlineKeyboardButton(text=f"📁 {cat['name']} ({cat['count']})",callback_data=f"stk:cat:{i}")])
+    rows.append([InlineKeyboardButton(text="➕ Create new category",callback_data="stk:newcat")])
+    rows.append([InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def show_stock_categories(target, state):
+    await state.clear()
+    categories=await list_categories()
+    await state.update_data(stock_categories=[c['name'] for c in categories])
+    if categories:
+        await target.answer("📁 <b>Step 1 of 4 — Choose a category</b>\nSelect an existing category or create a new one:",reply_markup=stock_category_keyboard(categories))
+    else:
+        await target.answer("📁 <b>Step 1 of 4 — Create a category</b>\nNo categories exist yet. Tap below to add the first category:",reply_markup=stock_category_keyboard([]))
+
+async def show_stock_products(target, state, category):
+    await state.clear()
+    products=await list_products(category=category,include_empty=True)
+    rows=[[InlineKeyboardButton(text=f"📦 {p['name']}",callback_data=f"stk:product:{p['id']}")] for p in products]
+    rows += [[InlineKeyboardButton(text="➕ Create new product",callback_data="stk:newproduct")],
+             [InlineKeyboardButton(text="⬅ Change category",callback_data="stk:start")],
+             [InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel")]]
+    await state.update_data(stock_category=category)
+    await target.answer(f"📦 <b>Step 2 of 4 — Choose a product</b>\nCategory: <b>{html.escape(category)}</b>\nSelect a product or create a new one:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+async def show_stock_plans(target, state, product_id):
+    p=await get_product(product_id)
+    if not p:
+        await target.answer("Product not found. Please start again.");await state.clear();return
+    await state.clear()
+    rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · {pl['stock']} in stock",callback_data=f"stk:plan:{pl['id']}")] for pl in p['plans']]
+    rows += [[InlineKeyboardButton(text="➕ Create new plan",callback_data="stk:newplan")],
+             [InlineKeyboardButton(text="⬅ Choose another product",callback_data="stk:backproducts")],
+             [InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel")]]
+    await state.update_data(stock_product_id=product_id,stock_product_name=p['name'])
+    await target.answer(f"🗓️ <b>Step 3 of 4 — Choose a plan</b>\nProduct: <b>{html.escape(p['name'])}</b>\nChoose a plan or create a new one:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(F.data=="stk:start")
+async def stock_flow_start(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    await state.clear();await show_stock_categories(call.message,state);await call.answer()
+
+@dp.callback_query(F.data=="stk:catalog")
+async def stock_catalog(call:CallbackQuery):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    products=await list_products(include_empty=True)
+    if not products:await call.message.answer("No products found yet.");await call.answer();return
+    lines=[]
+    for p in products:
+        lines.append(f"📁 <b>{html.escape(p['category'])}</b> / 📦 <b>{html.escape(p['name'])}</b>")
+        for pl in p['plans']:
+            lines.append(f"   • {html.escape(pl['duration'])}: {pl['stock']} keys · ₹{pl['price_inr']:.2f}")
+    await call.message.answer("\n".join(lines));await call.answer()
+
+@dp.callback_query(F.data.startswith("stk:cat:"))
+async def stock_pick_category(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    data=await state.get_data();cats=data.get('stock_categories',[])
+    try:category=cats[int(call.data.rsplit(':',1)[1])]
+    except (ValueError,IndexError):await call.answer("List expired. Start again.",show_alert=True);return
+    await show_stock_products(call.message,state,category);await call.answer()
+
+@dp.callback_query(F.data=="stk:newcat")
+async def stock_new_category(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    await state.set_state(AdminState.stock_category_name)
+    await call.message.answer("✍️ <b>New category</b>\nSend the category name (up to 100 characters). Send /cancel to stop.");await call.answer()
+
+@dp.message(AdminState.stock_category_name,F.text)
+async def stock_save_category(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    name=message.text.strip()
+    if not name or len(name)>100:await message.answer("Please send a category name between 1 and 100 characters.");return
+    await state.update_data(stock_category=name)
+    await admin_log(message.from_user.id,"CATEGORY_CREATE",name)
+    await show_stock_products(message,state,name)
+
+@dp.callback_query(F.data.startswith("stk:product:"))
+async def stock_pick_product(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    try:pid=int(call.data.rsplit(':',1)[1])
+    except ValueError:await call.answer("Invalid product",show_alert=True);return
+    await show_stock_plans(call.message,state,pid);await call.answer()
+
+@dp.callback_query(F.data=="stk:newproduct")
+async def stock_new_product(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    await state.set_state(AdminState.stock_product_name)
+    await call.message.answer("✍️ <b>New product</b>\nSend the product name. Send /cancel to stop.");await call.answer()
+
+@dp.message(AdminState.stock_product_name,F.text)
+async def stock_product_name(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    name=message.text.strip()
+    if not name or len(name)>160:await message.answer("Product name must be 1–160 characters.");return
+    await state.update_data(stock_new_product_name=name)
+    await state.set_state(AdminState.stock_product_description)
+    await message.answer("📝 Send a short product description, or send - to leave it blank.")
+
+@dp.message(AdminState.stock_product_description,F.text)
+async def stock_product_description(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    data=await state.get_data();desc="" if message.text.strip()=="-" else message.text.strip()
+    try:
+        p=await add_product(data['stock_new_product_name'],0,desc,data['stock_category'])
+        await admin_log(message.from_user.id,"PRODUCT_CREATE",f"{p['id']} {p['name']} category={data['stock_category']}")
+        await message.answer(f"✅ Product created: <b>{html.escape(p['name'])}</b>")
+        await show_stock_plans(message,state,p['id'])
+    except Exception:
+        log.exception("Guided product creation failed");await message.answer("Could not create product. Please try again or contact support.");await state.clear()
+
+@dp.callback_query(F.data=="stk:backproducts")
+async def stock_back_products(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    data=await state.get_data();await show_stock_products(call.message,state,data.get('stock_category','Other Products'));await call.answer()
+
+@dp.callback_query(F.data.startswith("stk:plan:"))
+async def stock_pick_plan(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    try:plan_id=int(call.data.rsplit(':',1)[1])
+    except ValueError:await call.answer("Invalid plan",show_alert=True);return
+    plan=await get_plan(plan_id)
+    if not plan:await call.answer("Plan not found",show_alert=True);return
+    await state.update_data(stock_plan_id=plan_id)
+    await state.set_state(AdminState.stock_keys)
+    await call.message.answer(f"🔑 <b>Step 4 of 4 — Upload keys</b>\nCategory: {html.escape(plan['category'])}\nProduct: {html.escape(plan['product_name'])}\nPlan: {html.escape(plan['duration'])}\n\nNow send keys, one per line. You can paste a large batch. Send /cancel to stop.")
+    await call.answer()
+
+@dp.callback_query(F.data=="stk:newplan")
+async def stock_new_plan(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    await state.set_state(AdminState.stock_plan_duration)
+    await call.message.answer("🗓️ <b>New plan</b>\nSend the plan name/duration (example: 1 Month, 3 Months, Lifetime). Send /cancel to stop.");await call.answer()
+
+@dp.message(AdminState.stock_plan_duration,F.text)
+async def stock_plan_duration(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    duration=message.text.strip()
+    if not duration or len(duration)>80:await message.answer("Plan name must be 1–80 characters.");return
+    await state.update_data(stock_new_duration=duration);await state.set_state(AdminState.stock_plan_prices)
+    await message.answer("💰 Send four prices separated by commas in this order:\n<code>Customer INR, Customer USD, Reseller INR, Reseller USD</code>\nExample: <code>499, 5.99, 399, 4.99</code>")
+
+@dp.message(AdminState.stock_plan_prices,F.text)
+async def stock_plan_prices(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    try:
+        vals=[float(x.strip()) for x in message.text.split(',')]
+        if len(vals)!=4 or any(v<0 for v in vals):raise ValueError
+        data=await state.get_data();pl=await add_plan(data['stock_product_id'],data['stock_new_duration'],*vals)
+        if not pl:await message.answer("Product not found. Please start the stock flow again.");await state.clear();return
+        await admin_log(message.from_user.id,"PLAN_CREATE",f"{pl['id']} {pl['duration']} product={data['stock_product_id']}")
+        await state.update_data(stock_plan_id=pl['id']);await state.set_state(AdminState.stock_keys)
+        await message.answer(f"✅ Plan created: <b>{html.escape(pl['duration'])}</b>\n\n🔑 <b>Step 4 of 4 — Upload keys</b>\nSend keys, one per line. Paste a large batch if needed. Send /cancel to stop.")
+    except ValueError:await message.answer("Invalid prices. Send exactly four non-negative numbers separated by commas, e.g. 499, 5.99, 399, 4.99.")
+    except Exception:
+        log.exception("Guided plan creation failed");await message.answer("Could not create plan. Please try again.");await state.clear()
+
+@dp.message(AdminState.stock_keys,F.text)
+async def stock_receive_keys(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    keys=[line.strip() for line in message.text.splitlines() if line.strip()]
+    if not keys:await message.answer("No keys found. Paste one key per line.");return
+    data=await state.get_data();plan_id=data.get('stock_plan_id')
+    added=await add_stock(plan_id,keys)
+    await admin_log(message.from_user.id,"KEY_BULK_UPLOAD",f"plan={plan_id}, added={added}, submitted={len(keys)}")
+    await state.clear()
+    await message.answer(f"✅ <b>Stock upload complete</b>\n\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nYour inventory is updated.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add more stock",callback_data="stk:start")],[InlineKeyboardButton(text="📋 View inventory",callback_data="stk:catalog")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin")]]))
+
+@dp.callback_query(F.data=="stk:admin")
+async def stock_back_admin(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    await state.clear();await call.message.answer("⚔️ <b>Admin Control</b>",reply_markup=admin_keyboard());await call.answer()
+
+@dp.callback_query(F.data=="stk:cancel")
+async def stock_flow_cancel(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
+    await state.clear();await call.message.answer("Stock update cancelled.",reply_markup=admin_keyboard());await call.answer()
+
+@dp.message(Command("cancel"))
+async def admin_cancel_flow(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    await state.clear();await message.answer("Current admin operation cancelled.",reply_markup=admin_keyboard())
+
 @dp.message(Command("addproduct"))
 async def admin_addproduct(message:Message):
     if not is_admin(message.from_user.id):return
@@ -357,21 +556,14 @@ async def admin_addplan(message:Message):
     except ValueError:await message.answer("Invalid command values; prices must be numeric and non-negative.")
 
 @dp.message(Command("addstock"))
-async def admin_addstock(message:Message):
+async def admin_addstock(message:Message,state:FSMContext):
     if not is_admin(message.from_user.id):return
     try:plan_id=int(message.text.partition(" ")[2].strip())
     except ValueError:await message.answer("Usage: /addstock PLAN_ID");return
-    pending_stock[message.from_user.id]=plan_id
-    await message.answer(f"Send keys for plan ID {plan_id}, one key per line. Send /cancel to abort.")
-
-@dp.message(F.text,~F.text.startswith("/"))
-async def receive_stock(message:Message):
-    plan_id=pending_stock.get(message.from_user.id)
-    if not plan_id or not is_admin(message.from_user.id):return
-    keys=[line.strip() for line in message.text.splitlines() if line.strip()]
-    if not keys:await message.answer("No keys found. Send one key per line.");return
-    added=await add_stock(plan_id,keys);pending_stock.pop(message.from_user.id,None);await admin_log(message.from_user.id,"KEY_BULK_UPLOAD",f"plan={plan_id}, added={added}")
-    await message.answer(f"Added {added} key(s) to plan ID {plan_id}.")
+    plan=await get_plan(plan_id)
+    if not plan:await message.answer("Plan not found.");return
+    await state.update_data(stock_plan_id=plan_id);await state.set_state(AdminState.stock_keys)
+    await message.answer(f"Send keys for {html.escape(plan['product_name'])} — {html.escape(plan['duration'])}, one per line. Send /cancel to abort.")
 
 @dp.message(Command("products"))
 async def admin_products(message:Message):
@@ -528,10 +720,6 @@ async def broadcast_resellers_start(message:Message,state:FSMContext):
     if not is_admin(message.from_user.id):return
     await state.update_data(audience="resellers");await state.set_state(AdminState.broadcast)
     await message.answer("Send the message to broadcast to active resellers.")
-
-@dp.message(Command("cancel"))
-async def cancel(message:Message,state:FSMContext):
-    pending_stock.pop(message.from_user.id,None);await state.clear();await message.answer("Cancelled.")
 
 async def run_webhook_server():
     from aiohttp import web

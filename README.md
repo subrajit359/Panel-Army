@@ -19,11 +19,14 @@ Set these in Railway:
 4. Set the Cashfree webhook URL to `https://YOUR_DOMAIN/cashfree/webhook`.
 5. Test with Cashfree sandbox before switching to production.
 
-## Admin commands
-- `/admin` shows commands
-- `/addproduct CATEGORY|NAME|DESCRIPTION` — create a product
-- `/addplan PRODUCT_ID|DURATION|PRICE_INR|PRICE_USD|RESELLER_INR|RESELLER_USD` — create a pricing duration
-- `/addstock PLAN_ID` then send keys one per line
+## Admin controls
+- `/admin` opens the inline admin control panel.
+- Open **Key Stock** → **Add / Update Key Stock** for the guided, button-first inventory workflow.
+- Select an existing category, or tap **Create new category**.
+- Select an existing product, or create a product and enter an optional description.
+- Select an existing plan, or create a plan by entering its duration and four prices (customer INR, customer USD, reseller INR, reseller USD).
+- Paste keys in bulk, one key per line. Duplicate keys are skipped and the result reports submitted, added, and duplicate counts.
+- `/addstock PLAN_ID` remains available as a legacy shortcut; it now uses the same state-based bulk upload flow.
 - `/wallet USER_ID|AMOUNT_INR` — admin credit to a user's wallet
 - `/setreseller USER_ID` — enable reseller pricing
 - `/products`
@@ -46,7 +49,7 @@ The shop flow includes category → product → duration plan → wallet or Cash
 - This package installs SQLAlchemy with its asyncio extra (`SQLAlchemy[asyncio]`), which includes `greenlet`. Redeploy after updating the requirements.
 
 ## Telegram admin control panel
-Open `/admin` as an account listed in `ADMIN_IDS` to use the inline admin menu. The panel provides dashboard totals, user search/profile, ban/unban, wallet adjustment/history, product maintenance, stock status, order/payment review, reseller controls, broadcasts, coupon creation, settings storage, and admin audit logs.
+Open `/admin` as an account listed in `ADMIN_IDS` to use the inline admin menu. The panel provides dashboard totals, user search/profile, ban/unban, wallet adjustment/history, product maintenance, stock status, order/payment review, reseller controls, broadcasts, coupon creation, settings storage, and admin audit logs. The Key Stock section includes a guided category → product → plan → bulk-key workflow; categories, products and plans can all be created from inline-button prompts without typing commands.
 
 ### Additional admin commands
 - `/walletadjust USER_ID|AMOUNT` — credit with a positive amount or deduct with a negative amount; refuses a negative resulting balance.
