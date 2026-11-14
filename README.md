@@ -33,3 +33,9 @@ Set these in Railway:
 - Add pending-order expiry, delivery retry queue, stock-reservation strategy, rate limits, admin audit logs, privacy notice, refund process, and backup/monitoring before launch.
 - Never commit `.env` or real payment credentials.
 - Sell only authorized, lawful digital goods. Do not use this bot to distribute spyware, stolen credentials, or unauthorized personal-data access.
+
+
+## Railway startup troubleshooting
+
+- Set `BOT_TOKEN` in Railway Variables to the token from @BotFather. The app intentionally exits if this variable is missing.
+- This package installs SQLAlchemy with its asyncio extra (`SQLAlchemy[asyncio]`), which includes `greenlet`. Redeploy after updating the requirements.
