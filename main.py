@@ -6,18 +6,19 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram import BaseMiddleware
 from config import BOT_TOKEN, ADMIN_IDS, PUBLIC_BASE_URL
 from db import (init_db, get_or_create_user, list_categories, list_products, get_product, get_plan,
-                create_order, get_order, fulfill_paid_order, credit_wallet_for_no_stock, add_product, add_plan, add_stock,
+                create_order, get_order, fulfill_paid_order, credit_wallet_for_no_stock, add_product, add_plan, add_stock, create_topup_order, fulfill_wallet_topup,
                 list_orders, get_user, pay_wallet, set_payment_link, expire_order, dashboard_stats, search_users,
                 admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
                 set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
-                set_bot_setting, recent_admin_logs, admin_log, record_refund, refund_history, list_keys)
-from cashfree import create_upi_qr_order, fetch_order_payments, verify_webhook_signature
+                set_bot_setting, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats,
+                attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock)
+from cashfree import create_upi_qr_order, fetch_order_payments, verify_webhook_signature, close_cashfree_session
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger("panel_army")
@@ -26,6 +27,8 @@ dp=Dispatcher()
 
 class CheckoutState(StatesGroup):
     waiting_phone=State()
+    custom_quantity=State()
+    custom_topup=State()
 
 class ContactState(StatesGroup):
     waiting_contact=State()
@@ -39,6 +42,7 @@ class AdminState(StatesGroup):
     stock_plan_duration=State()
     stock_plan_prices=State()
     stock_keys=State()
+    reward_keys=State()
 
 def is_admin(user_id:int)->bool:return user_id in ADMIN_IDS
 
@@ -46,7 +50,8 @@ def admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Dashboard",callback_data="adm:dashboard"),InlineKeyboardButton(text="👥 Users",callback_data="adm:users")],
         [InlineKeyboardButton(text="💰 Wallet",callback_data="adm:wallet"),InlineKeyboardButton(text="📦 Products",callback_data="adm:products")],
-        [InlineKeyboardButton(text="🔑 Key Stock",callback_data="adm:stock"),InlineKeyboardButton(text="💳 Payments",callback_data="adm:payments")],
+        [InlineKeyboardButton(text="🔑 Key Stock",callback_data="adm:stock"),InlineKeyboardButton(text="🎁 Reward Key Stock",callback_data="rewardstock:menu")],
+        [InlineKeyboardButton(text="💳 Payments",callback_data="adm:payments")],
         [InlineKeyboardButton(text="👑 Resellers",callback_data="adm:resellers"),InlineKeyboardButton(text="📢 Broadcast",callback_data="adm:broadcast")],
         [InlineKeyboardButton(text="🎟️ Coupons",callback_data="adm:coupons"),InlineKeyboardButton(text="⚙️ Settings",callback_data="adm:settings")],
         [InlineKeyboardButton(text="📜 Admin Logs",callback_data="adm:logs")],
@@ -61,6 +66,32 @@ def main_keyboard():
         [InlineKeyboardButton(text="📥 Download Files",callback_data="downloads"),InlineKeyboardButton(text="📺 How to Use",callback_data="howto")],
         [InlineKeyboardButton(text="🎧 Support",callback_data="support")],
     ])
+
+def store_welcome(name="Customer"):
+    safe=html.escape(name or "Customer")
+    return ("🏪 ━━ Panel Army Store ━━ 🏪\n\n" f"👋 Welcome, {safe}!\n\n"
+            "⭐ ━ STORE HIGHLIGHTS ━ ⭐\n\n│ 🔑 Premium Game Keys\n│ ⚡ Instant Delivery 24/7\n│ 🔒 100% Secure Payment\n│ 💰 Best Prices Guaranteed\n│ 🎁 Referral Rewards\n│ 📞 Professional Support\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🚀 Tap Shop Now to Start!")
+
+def home_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛍️ Open Shop Menu",callback_data="home")]])
+
+def quantity_keyboard(plan_id, product_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1",callback_data=f"qty:{plan_id}:1"),InlineKeyboardButton(text="5",callback_data=f"qty:{plan_id}:5"),InlineKeyboardButton(text="10",callback_data=f"qty:{plan_id}:10"),InlineKeyboardButton(text="15",callback_data=f"qty:{plan_id}:15")],
+        [InlineKeyboardButton(text="✍️ Custom Quantity",callback_data=f"qtycustom:{plan_id}")],
+        [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{product_id}")]])
+
+def quantity_payment_keyboard(plan_id, quantity, amount, balance):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Pay with Wallet (₹{amount:.2f}) · Balance ₹{balance:.2f}",callback_data=f"wallet:{plan_id}:{quantity}")],
+        [InlineKeyboardButton(text="💳 Pay with UPI / Paytm (INR)",callback_data=f"upi:{plan_id}:{quantity}")],
+        [InlineKeyboardButton(text="🔙 Change Quantity",callback_data=f"plan:{plan_id}")]])
+
+def topup_amount_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="₹10",callback_data="topup:10"),InlineKeyboardButton(text="₹20",callback_data="topup:20"),InlineKeyboardButton(text="₹50",callback_data="topup:50")],
+        [InlineKeyboardButton(text="₹100",callback_data="topup:100"),InlineKeyboardButton(text="✍️ Custom Amount",callback_data="topup:custom")],
+        [InlineKeyboardButton(text="🔙 Dashboard",callback_data="home")]])
 
 def category_keyboard(categories):
     rows=[[InlineKeyboardButton(text=f"{cat['name']} ({cat['count']})",callback_data="category:"+cat['name'])] for cat in categories]
@@ -101,7 +132,7 @@ def plan_keyboard(product,user=None):
 def payment_keyboard(plan_id,amount,user_balance):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"✅ Pay with Wallet (₹{amount:.2f}) · Balance ₹{user_balance:.2f}",callback_data=f"wallet:{plan_id}")],
-        [InlineKeyboardButton(text="💳 Pay with UPI (Cashfree)",callback_data=f"upi:{plan_id}")],
+        [InlineKeyboardButton(text="💳 Pay with UPI / Paytm (INR)",callback_data=f"upi:{plan_id}")],
         [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{plan_id}")],
     ])
 
@@ -126,7 +157,10 @@ dp.callback_query.outer_middleware(BanGuard())
 
 @dp.message(CommandStart())
 async def start(message:Message,state:FSMContext):
-    await get_or_create_user(message.from_user.id,message.from_user.username,message.from_user.full_name)
+    is_new_user=await get_or_create_user(message.from_user.id,message.from_user.username,message.from_user.full_name)
+    parts=(message.text or "").split(maxsplit=1)
+    if is_new_user and len(parts)>1 and parts[1].startswith("ref_") and parts[1][4:].isdigit():
+        await attach_referrer(message.from_user.id,int(parts[1][4:]))
     user=await get_user(message.from_user.id)
     if not user or not user.get("phone"):
         await state.set_state(ContactState.waiting_contact)
@@ -148,7 +182,7 @@ async def start(message:Message,state:FSMContext):
         await message.answer(verification_text,reply_markup=kb)
         return
     await state.clear()
-    await message.answer("🏪 ━━ Panel Army Store ━━ 🏪\n\n👋 Welcome, Customer!\n\n⭐ ━ STORE HIGHLIGHTS ━ ⭐\n\n│ 🔑 Premium Game Keys\n│ ⚡ Instant Delivery 24/7\n│ 🔒 100% Secure Payment\n│ 💰 Best Prices Guaranteed\n│ 🎁 Referral Rewards\n│ 📞 Professional Support\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🚀 Tap Shop Now to Start!",reply_markup=main_keyboard())
+    await message.answer(store_welcome(message.from_user.first_name),reply_markup=main_keyboard())
 
 @dp.message(ContactState.waiting_contact,F.contact)
 async def save_start_contact(message:Message,state:FSMContext):
@@ -164,7 +198,7 @@ async def save_start_contact(message:Message,state:FSMContext):
     await set_user_phone(message.from_user.id,phone)
     await state.clear()
     await message.answer("🛡️ <b>Identity Confirmed Successfully!</b>\n\n✅ Your phone number has been verified.\n🔒 Your account is now protected.\n⚡ You can now shop and receive instant key delivery.",reply_markup=ReplyKeyboardRemove())
-    await message.answer("🏪 ━━ Panel Army Store ━━ 🏪\n\n👋 Welcome, Customer!\n\n⭐ ━ STORE HIGHLIGHTS ━ ⭐\n\n│ 🔑 Premium Game Keys\n│ ⚡ Instant Delivery 24/7\n│ 🔒 100% Secure Payment\n│ 💰 Best Prices Guaranteed\n│ 🎁 Referral Rewards\n│ 📞 Professional Support\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🚀 Tap Shop Now to Start!",reply_markup=main_keyboard())
+    await message.answer(store_welcome(message.from_user.first_name),reply_markup=main_keyboard())
 
 @dp.callback_query(F.data.in_({"shop","store"}))
 async def shop(call:CallbackQuery):
@@ -206,22 +240,43 @@ async def outstock(call:CallbackQuery):await call.answer("This plan is out of st
 @dp.callback_query(F.data.startswith("plan:"))
 async def plan_view(call:CallbackQuery):
     plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
-    if not p or p['stock']<1:await call.answer("Out of stock.",show_alert=True);return
-    user=await get_user(call.from_user.id)
-    reseller=bool(user and user['is_reseller'])
-    price_inr=p['reseller_price_inr'] if reseller else p['price_inr'];price_usd=p['reseller_price_usd'] if reseller else p['price_usd']
-    bal=user['wallet_balance'] if user else 0
-    text=(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-          f"📦 Quantity: 1 key\n💰 Total Price: ${price_usd:.2f} (₹{price_inr:.2f})\n👛 Wallet: ₹{bal:.2f}\n\nChoose a payment method:")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"✅ Pay with Wallet (₹{price_inr:.2f})",callback_data=f"wallet:{plan_id}")],[InlineKeyboardButton(text="💳 Pay with UPI (Cashfree)",callback_data=f"upi:{plan_id}")],[InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{p['product_id']}")]])
-    await call.message.edit_text(text,reply_markup=kb);await call.answer()
+    if not p or p['stock']<1:await call.answer("This plan is out of stock.",show_alert=True);return
+    await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n\n📦 Available Stock: {p['stock']}\n\nSelect purchase quantity:",reply_markup=quantity_keyboard(plan_id,p['product_id']));await call.answer()
+
+@dp.callback_query(F.data.startswith("qty:"))
+async def quantity_pick(call:CallbackQuery):
+    _,pid_s,qty_s=call.data.split(":");plan_id=int(pid_s);quantity=int(qty_s);p=await get_plan(plan_id)
+    if not p or quantity<1 or p['stock']<quantity:await call.answer("Not enough stock for that quantity.",show_alert=True);return
+    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];usd=p['reseller_price_usd'] if reseller else p['price_usd'];amount=round(unit*quantity,2)
+    await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ${usd*quantity:.2f} (₹{amount:.2f})\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0));await call.answer()
+
+@dp.callback_query(F.data.startswith("qtycustom:"))
+async def quantity_custom(call:CallbackQuery,state:FSMContext):
+    plan_id=int(call.data.split(":",1)[1]);await state.update_data(custom_plan_id=plan_id);await state.set_state(CheckoutState.custom_quantity);await call.message.answer("Send the quantity you want to buy (whole number). Stock availability will be checked.");await call.answer()
+
+@dp.message(CheckoutState.custom_quantity)
+async def quantity_custom_received(message:Message,state:FSMContext):
+    try:quantity=int(message.text.strip())
+    except Exception:await message.answer("Please send a whole number, for example 25.");return
+    data=await state.get_data();plan_id=int(data['custom_plan_id']);await state.clear();p=await get_plan(plan_id)
+    if quantity<1 or not p or quantity>p['stock']:await message.answer(f"Invalid quantity. Available stock: {p['stock'] if p else 0}. Please select the plan again.");return
+    u=await get_user(message.from_user.id);unit=p['reseller_price_inr'] if u and u['is_reseller'] else p['price_inr'];usd=p['reseller_price_usd'] if u and u['is_reseller'] else p['price_usd'];amount=round(unit*quantity,2)
+    await message.answer(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ${usd*quantity:.2f} (₹{amount:.2f})\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0))
+
+async def notify_referral_reward(referred_user_id):
+    reward=await award_referral_after_purchase(referred_user_id)
+    if reward:
+        try:
+            await bot.send_message(reward["referrer_id"],"🎁 <b>You earned a Referral Trial Key!</b>\n\nYour friend completed their first purchase. Open Referral from the dashboard and choose Root or Non Root to claim your random trial key.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Claim Referral Reward",callback_data="referral")]]))
+        except Exception: log.exception("Could not notify referrer")
 
 @dp.callback_query(F.data.startswith("wallet:"))
 async def wallet_pay(call:CallbackQuery):
-    plan_id=int(call.data.split(":",1)[1])
+    parts=call.data.split(":");plan_id=int(parts[1]);quantity=int(parts[2]) if len(parts)>2 else 1
     try:
-        result=await pay_wallet(call.from_user.id,plan_id,1)
+        result=await pay_wallet(call.from_user.id,plan_id,quantity)
         await call.message.answer(success_message(result['product_name'],result['duration'],result['quantity'],result['key_text']))
+        await notify_referral_reward(call.from_user.id)
         await call.answer("Paid from wallet!")
     except ValueError as e:
         await call.answer(str(e),show_alert=True)
@@ -230,15 +285,18 @@ async def wallet_pay(call:CallbackQuery):
 
 @dp.callback_query(F.data.startswith("upi:"))
 async def upi_begin(call:CallbackQuery,state:FSMContext):
-    plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
-    if not p or p['stock']<1:await call.answer("Out of stock.",show_alert=True);return
+    # Stop Telegram's callback spinner immediately; Cashfree may take a few seconds.
+    await call.answer("Generating your secure UPI QR…")
+    parts=call.data.split(":");plan_id=int(parts[1]);quantity=int(parts[2]) if len(parts)>2 else 1;p=await get_plan(plan_id)
+    if not p or p['stock']<quantity:await call.message.answer("Not enough stock for that quantity.");return
     user=await get_user(call.from_user.id)
     if not user or not user.get("phone"):
-        await call.answer("Please restart the bot and share your phone number first.",show_alert=True);return
-    amount=p['reseller_price_inr'] if user and user['is_reseller'] else p['price_inr']
-    order=await create_order(call.from_user.id,plan_id,amount,1,"CASHFREE")
+        await call.message.answer("Please restart the bot and share your phone number first.");return
+    unit=p['reseller_price_inr'] if user and user['is_reseller'] else p['price_inr'];amount=round(unit*quantity,2)
+    order=await create_order(call.from_user.id,plan_id,amount,quantity,"CASHFREE")
     try:
-        payment=await create_upi_qr_order(order['order_id'],amount,call.from_user.id,call.from_user.full_name or f"user{call.from_user.id}",user['phone'])
+        payment_title=f"Payment for {p['product_name']} ({p['duration']})"
+        payment=await create_upi_qr_order(order['order_id'],amount,call.from_user.id,call.from_user.full_name or f"user{call.from_user.id}",user['phone'],payment_title)
         await set_payment_link(order['order_id'],payment['cashfree_order_id'])
         if payment.get("qr_image_bytes"):
             # Cashfree supplied the rendered QR image; send it directly.
@@ -249,14 +307,13 @@ async def upi_begin(call:CallbackQuery,state:FSMContext):
             image=qr.make_image(fill_color="black",back_color="white")
             bio=BytesIO();image.save(bio,format="PNG");bio.seek(0)
             qr_image = bio.getvalue()
-        caption=(f"💸 <b>Cashfree UPI Payment</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n🎮 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: 1 key\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan this unique QR using any UPI app.\n⚡ Your payment will be verified automatically and your key delivered here.\n⏰ Payment window: 5 minutes.")
+        caption=(f"💸 <b>{html.escape(payment_title)}</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n🎮 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: {quantity} key(s)\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan this unique QR using any UPI app, including Paytm.\n⚡ Your payment will be verified automatically and your key delivered here.\n⏰ Payment window: 5 minutes.")
         kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}")]])
         await call.message.answer_photo(BufferedInputFile(qr_image,filename="cashfree_upi_qr.png"),caption=caption,reply_markup=kb)
     except Exception:
         log.exception("Cashfree UPI QR creation failed")
         await expire_order(order['order_id'])
         await call.message.answer("❌ Cashfree could not create the UPI QR for this order. No payment was taken. Please try again or contact support.")
-    await call.answer()
 
 @dp.callback_query(F.data.startswith("check:"))
 async def check_payment(call:CallbackQuery):
@@ -271,11 +328,18 @@ async def check_payment(call:CallbackQuery):
         payments=remote if isinstance(remote,list) else remote.get("payments",[]) if isinstance(remote,dict) else []
         successful=next((x for x in payments if x.get("payment_status")=="SUCCESS" and abs(float(x.get("payment_amount") or 0)-order['amount_inr'])<0.005),None)
         if successful:
+            if order.get("payment_method")=="TOPUP":
+                credited=await fulfill_wallet_topup(order_id)
+                if credited and credited.get("credited"):
+                    await call.message.answer(f"✅ <b>Wallet Top-up Successful!</b>\n\n💰 ₹{credited['amount']:.2f} has been added to your wallet.")
+                else: await call.message.answer("This wallet top-up has already been credited.")
+                await call.answer("Payment verified!");return
             result=await fulfill_paid_order(order_id) if order['status'] in ("PENDING","EXPIRED") else {"key_text":None} if order['status']=="PAID_NO_STOCK" else None
             if result and result.get('key_text'):
                 plan=await get_plan(order['plan_id']) if order.get('plan_id') else None
                 game=plan['product_name'] if plan else "Product"
                 await call.message.answer(success_message(game,order['duration'],order['quantity'],result['key_text']))
+                await notify_referral_reward(call.from_user.id)
             elif result and not result.get('key_text'):
                 refund=await credit_wallet_for_no_stock(order_id)
                 if refund and refund.get('credited'):
@@ -294,21 +358,112 @@ async def check_payment(call:CallbackQuery):
 @dp.callback_query(F.data=="orders")
 async def orders_cb(call:CallbackQuery):
     rows=await list_orders(call.from_user.id)
-    msg="📦 <b>My Orders</b>\n\n"+("\n".join(f"• <code>{o['order_id']}</code> — ₹{o['amount_inr']:.2f} — {o['status']} ({o['duration']})" for o in rows[:10]) if rows else "You have no orders yet.")
-    await call.message.edit_text(msg,reply_markup=main_keyboard());await call.answer()
+    if not rows:msg="🛍️ ━━ MY ORDERS ━━ 🛍️\n\nYou have no orders yet."
+    else:
+        chunks=["🛍️ ━━ MY ORDERS ━━ 🛍️\n"]
+        for o in rows[:10]:
+            key=html.escape(o.get('key_text') or "Pending / not delivered")
+            dt=o['created_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('created_at') else "—"
+            chunks.append(f"🎮 <b>{html.escape(o['product_name'])}</b>\n   ⏳ {html.escape(o['duration'])}\n   🔑 <code>{key}</code>\n   💰 ${o['amount_inr']/90:.2f} (₹{o['amount_inr']:.2f}) │ 📅 {dt}\n   📌 Status: {html.escape(o['status'])}\n━━━━━━━━━━━━━━━━━━━━━━")
+        msg="\n".join(chunks)
+    await call.message.edit_text(msg,reply_markup=home_keyboard());await call.answer()
 
 @dp.callback_query(F.data=="profile")
 async def profile(call:CallbackQuery):
-    u=await get_user(call.from_user.id)
-    await call.message.edit_text(f"👤 <b>Your Profile</b>\n\n🆔 Telegram ID: <code>{call.from_user.id}</code>\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n🏷️ Account: {'Reseller' if u and u['is_reseller'] else 'User'}",reply_markup=main_keyboard());await call.answer()
+    u=await get_user(call.from_user.id);stats=await user_order_stats(call.from_user.id)
+    spent=stats['spent'];orders_count=stats['orders'];balance=u['wallet_balance'] if u else 0;refstats=await referral_stats(call.from_user.id);joined=u['created_at'].strftime("%Y-%m-%d %H:%M:%S") if u and u.get('created_at') else "—"
+    role="👑 Reseller" if u and u['is_reseller'] else "🧑‍💼 Customer"
+    msg=("👤 ━━ YOUR PROFILE ━━ 👤\n\n" f"🆔 User ID: <code>{call.from_user.id}</code>\n📛 Name: {html.escape(call.from_user.full_name or 'Customer')}\n👑 Account: {role}\n\n💰 ━ Balance ━\n   💳 Current: ${balance/90:.2f} (₹{balance:.2f})\n\n📊 ━ Statistics ━\n   📦 Orders: {orders_count}\n   💸 Spent: ${spent/90:.2f} (₹{spent:.2f})\n   👥 Referrals: {refstats['total']}\n\n📅 Joined: {joined}")
+    await call.message.edit_text(msg,reply_markup=home_keyboard());await call.answer()
 
-@dp.callback_query(F.data.in_({"balance","referral","spin","reseller","downloads","howto","support","help"}))
+@dp.callback_query(F.data=="balance")
+async def balance_menu(call:CallbackQuery):
+    u=await get_user(call.from_user.id);balance=u['wallet_balance'] if u else 0
+    msg=("💰 ━━ ADD BALANCE ━━ 💰\n\n" f"💳 Current Balance: ${balance/90:.2f} (₹{balance:.2f})\n\n━━━━━━━━━━━━━━━━━━━━━━\n💳 Available Payment Methods:\n  🇮🇳 Paytm/UPI (INR)\n\n✅ Use balance for purchases!\n━━━━━━━━━━━━━━━━━━━━━━\n\nSelect amount to deposit.\nYou'll choose your payment method next:\n\nMinimum deposit: ₹10")
+    await call.message.edit_text(msg,reply_markup=topup_amount_keyboard());await call.answer()
+
+@dp.callback_query(F.data=="topup:custom")
+async def topup_custom(call:CallbackQuery,state:FSMContext):
+    await state.set_state(CheckoutState.custom_topup);await call.message.answer("Enter the amount to add. Minimum ₹10.");await call.answer()
+
+@dp.message(CheckoutState.custom_topup)
+async def topup_custom_received(message:Message,state:FSMContext):
+    try:amount=round(float(message.text.strip()),2)
+    except Exception:await message.answer("Enter a valid amount, for example 150.");return
+    await state.clear()
+    if amount<10 or amount>50000:await message.answer("Minimum top-up is ₹10. Maximum is ₹50,000.");return
+    await show_topup_method(message,amount)
+
+async def show_topup_method(target,amount):
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🇮🇳 Paytm / UPI (INR)",callback_data=f"topuppay:{amount:.2f}")],[InlineKeyboardButton(text="🔙 Back",callback_data="balance")]])
+    await target.answer(f"💰 Deposit amount: <b>₹{amount:.2f}</b>\n\nSelect your payment method:",reply_markup=kb)
+
+async def start_topup_payment(message:Message,amount:float,user_id=None,customer_name=None):
+    user_id=user_id or message.from_user.id;customer_name=customer_name or message.from_user.full_name or "Customer"
+    u=await get_user(user_id)
+    if not u or not u.get('phone'):await message.answer("Please verify your phone number with /start before adding balance.");return
+    order=await create_topup_order(user_id,amount)
+    try:
+        title=f"Panel Army Wallet Top-up ₹{amount:.2f}"
+        payment=await create_upi_qr_order(order['order_id'],amount,user_id,customer_name,u['phone'],title)
+        await set_payment_link(order['order_id'],payment['cashfree_order_id'])
+        qrbytes=payment.get('qr_image_bytes')
+        if not qrbytes:
+            qr=qrcode.QRCode(box_size=8,border=3);qr.add_data(payment['qr_value']);qr.make(fit=True);img=qr.make_image(fill_color="black",back_color="white");bio=BytesIO();img.save(bio,format="PNG");qrbytes=bio.getvalue()
+        caption=f"💸 <b>{html.escape(title)}</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan using any UPI app, including Paytm. Wallet balance will be credited automatically after payment confirmation."
+        await message.answer_photo(BufferedInputFile(qrbytes,filename="wallet_topup_qr.png"),caption=caption,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}")]]))
+    except Exception:
+        log.exception("Wallet top-up QR creation failed");await expire_order(order['order_id']);await message.answer("Cashfree could not create the QR. No payment was taken. Please try again.")
+
+@dp.callback_query(F.data.startswith("topup:"))
+async def topup_fixed(call:CallbackQuery):
+    amount=float(call.data.split(":",1)[1])
+    if amount<10:await call.answer("Minimum top-up is ₹10.",show_alert=True);return
+    await show_topup_method(call.message,amount)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("topuppay:"))
+async def topup_pay_method(call:CallbackQuery):
+    amount=float(call.data.split(":",1)[1])
+    await call.answer("Creating UPI QR…")
+    await start_topup_payment(call.message,amount,call.from_user.id,call.from_user.full_name)
+
+@dp.callback_query(F.data=="referral")
+async def referral_menu(call:CallbackQuery):
+    st=await referral_stats(call.from_user.id)
+    link=f"https://t.me/panelxarmy_bot?start=ref_{call.from_user.id}"
+    msg=("🎁 <b>REFERRAL PROGRAM</b>\n\n✅ Status: Active\n━━━━━━━━━━━━━━━━━━━━━━\n📊 <b>YOUR STATS:</b>\n"
+         f"├ 👥 Total Referrals: {st['total']}\n├ 🛒 Active (Purchased): {st['active']}\n└ 🎟️ Total Trial Keys You Got: {st['trials']}\n\n"
+         "━━━━━━━━━━━━━━━━━━━━━━\n🔗 <b>Your Referral Link:</b>\n"
+         f"<code>{link}</code>\n\n📱 <b>How it works:</b>\n1. Share your link\n2. Friend joins using your link\n3. When they buy any product, you can claim one random Trial Key (Root or Non-Root)\n\n"
+         "💡 <b>Reward:</b> After your referred friend completes their first successful purchase, choose Root or Non Root. One available key is selected randomly from matching stock.")
+    rows=[]
+    if st['pending']:
+        rows=[[InlineKeyboardButton(text="🌳 Claim Root Trial Key",callback_data="refclaim:ROOT"),InlineKeyboardButton(text="📱 Claim Non-Root Trial Key",callback_data="refclaim:NON_ROOT")]]
+    rows.append([InlineKeyboardButton(text="🔙 Back",callback_data="home")])
+    await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await call.answer()
+
+@dp.callback_query(F.data.startswith("refclaim:"))
+async def referral_claim(call:CallbackQuery):
+    kind=call.data.split(":",1)[1]
+    result=await claim_referral_reward(call.from_user.id,kind)
+    if not result or result.get("error"):
+        error=(result or {}).get("error")
+        msg={"NO_REWARD":"No pending referral reward yet.","NO_STOCK":"No matching trial keys are currently available. Please try again later."}.get(error,"Could not claim reward.")
+        await call.answer(msg,show_alert=True);return
+    await call.message.answer(f"🎉 <b>Referral Trial Key Claimed!</b>\n\nType: {html.escape(result['reward_type'])}\n🔑 Key: <code>{html.escape(result['key_text'])}</code>")
+    await call.message.edit_text("🎁 Referral reward claimed successfully!\n\nYour trial key was sent above.",reply_markup=home_keyboard())
+    await call.answer("Trial key delivered!")
+
+@dp.callback_query(F.data.in_({"spin","reseller","downloads","howto","support","help"}))
 async def menu_stub(call:CallbackQuery):
-    msgs={"balance":"Wallet top-up UI will be configured in a later stage.","referral":"Referral feature will be configured in a later stage.","spin":"Lucky Spin will be configured in a later stage.","reseller":"Reseller dashboard will be configured in a later stage.","downloads":"Downloads will be configured in a later stage.","howto":"How-to guide will be configured in a later stage.","support":"Please contact the administrator for support.","help":"Please contact the administrator for order and delivery support."}
-    await call.message.edit_text(msgs[call.data],reply_markup=main_keyboard());await call.answer()
+    if call.data=="support":msg="🎫 ━━ SUPPORT CENTER ━━ 🎫\n━━━━━━━━━━━━━━━━━━━━━━\n\nNeed help? We're here for you! 💬\nContact with @subro98\n━━━━━━━━━━━━━━━━━━━━━"
+    else:msg={"spin":"🎰 Lucky Spin will be available soon.","reseller":"⚡ Contact support to activate reseller access.","downloads":"📥 Download files will be available soon.","howto":"📺 How-to guides will be available soon.","help":"Contact support at @subro98 for order and delivery help."}[call.data]
+    await call.message.edit_text(msg,reply_markup=home_keyboard());await call.answer()
 
 @dp.callback_query(F.data=="home")
-async def home(call:CallbackQuery):await call.message.edit_text("⚔️ <b>PANEL ARMY</b>\nChoose an option:",reply_markup=main_keyboard());await call.answer()
+async def home(call:CallbackQuery):
+    u=await get_user(call.from_user.id);await call.message.edit_text(store_welcome(u.get('full_name') if u else call.from_user.first_name),reply_markup=main_keyboard());await call.answer()
 
 @dp.message(Command("admin"))
 async def admin_help(message:Message):
@@ -435,6 +590,41 @@ async def show_stock_plans(target, state, product_id):
     await state.update_data(stock_product_id=product_id,stock_product_name=p['name'])
     await target.answer(f"🗓️ <b>Step 3 of 4 — Choose a plan</b>\nProduct: <b>{html.escape(p['name'])}</b>\nChoose a plan or create a new one:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
+@dp.callback_query(F.data=="rewardstock:menu")
+async def reward_stock_menu(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer("Admin access required",show_alert=True);return
+    await state.clear()
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌳 Add Root Trial Keys",callback_data="rewardstock:type:ROOT")],
+        [InlineKeyboardButton(text="📱 Add Non-Root Trial Keys",callback_data="rewardstock:type:NON_ROOT")],
+        [InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]])
+    await call.message.answer("🎁 <b>Referral Reward Key Stock</b>\n\nThis is a separate inventory reserved only for referral rewards. Keys added here will NOT appear in normal shop stock or be sold to customers.",reply_markup=kb)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("rewardstock:type:"))
+async def reward_stock_type(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer("Admin access required",show_alert=True);return
+    kind=call.data.rsplit(":",1)[1]
+    if kind not in ("ROOT","NON_ROOT"):
+        await call.answer("Invalid reward type",show_alert=True);return
+    await state.clear();await state.update_data(reward_stock_type=kind);await state.set_state(AdminState.reward_keys)
+    await call.message.answer(f"Send {kind.replace('_','-')} referral trial keys, one key per line. These keys are separate from shop inventory. Send /cancel to stop.")
+    await call.answer()
+
+@dp.message(AdminState.reward_keys,F.text)
+async def reward_stock_receive(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    data=await state.get_data();kind=data.get("reward_stock_type")
+    keys=[line.strip() for line in message.text.splitlines() if line.strip()]
+    if not keys:
+        await message.answer("No keys found. Send one key per line.");return
+    added=await add_referral_stock(kind,keys)
+    await admin_log(message.from_user.id,"REFERRAL_KEY_UPLOAD",f"type={kind}, added={added}, submitted={len(keys)}")
+    await state.clear()
+    await message.answer(f"✅ <b>Referral Reward Stock Updated</b>\n\nType: {kind.replace('_','-')}\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nThese keys are reserved for referral claims only.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add more reward keys",callback_data="rewardstock:menu")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin")]]))
+
 @dp.callback_query(F.data=="stk:start")
 async def stock_flow_start(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await call.answer("Admin access required",show_alert=True);return
@@ -556,9 +746,9 @@ async def stock_receive_keys(message:Message,state:FSMContext):
     if not keys:await message.answer("No keys found. Paste one key per line.");return
     data=await state.get_data();plan_id=data.get('stock_plan_id')
     added=await add_stock(plan_id,keys)
-    await admin_log(message.from_user.id,"KEY_BULK_UPLOAD",f"plan={plan_id}, added={added}, submitted={len(keys)}")
+    await admin_log(message.from_user.id,"REWARD_KEY_UPLOAD" if data.get("reward_stock_type") else "KEY_BULK_UPLOAD",f"plan={plan_id}, type={data.get('reward_stock_type','SHOP')}, added={added}, submitted={len(keys)}")
     await state.clear()
-    await message.answer(f"✅ <b>Stock upload complete</b>\n\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nYour inventory is updated.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add more stock",callback_data="stk:start")],[InlineKeyboardButton(text="📋 View inventory",callback_data="stk:catalog")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin")]]))
+    await message.answer(f"✅ <b>{'Reward key stock' if data.get('reward_stock_type') else 'Stock'} upload complete</b>\n\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nYour inventory is updated.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Add more reward keys",callback_data="rewardstock:menu")],[InlineKeyboardButton(text="📋 View inventory",callback_data="stk:catalog")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin")]]))
 
 @dp.callback_query(F.data=="stk:admin")
 async def stock_back_admin(call:CallbackQuery,state:FSMContext):
@@ -784,10 +974,16 @@ async def run_webhook_server():
                     rows=payments if isinstance(payments,list) else payments.get("payments",[]) if isinstance(payments,dict) else []
                     successful=next((x for x in rows if x.get("payment_status")=="SUCCESS" and abs(float(x.get("payment_amount") or 0)-order['amount_inr'])<0.005),None)
                     if successful:
+                        if order.get("payment_method")=="TOPUP":
+                            credited=await fulfill_wallet_topup(order_id)
+                            if credited and credited.get("credited"):
+                                await bot.send_message(order['user_id'],f"✅ <b>Wallet Top-up Successful!</b>\n\n💰 ₹{credited['amount']:.2f} has been added to your wallet.")
+                            return web.Response(text="OK")
                         result=await fulfill_paid_order(order_id) if order['status'] in ("PENDING","EXPIRED") else {"key_text":None}
                         if result and result.get("key_text"):
                             plan=await get_plan(order['plan_id']) if order.get('plan_id') else None
                             await bot.send_message(order['user_id'],success_message(plan['product_name'] if plan else "Product",order['duration'],order['quantity'],result['key_text']))
+                            await notify_referral_reward(order['user_id'])
                         elif result and not result.get("key_text"):
                             refund=await credit_wallet_for_no_stock(order_id)
                             if refund and refund.get("credited"):
@@ -800,8 +996,11 @@ async def run_webhook_server():
     runner=web.AppRunner(app);await runner.setup();port=int(os.getenv("PORT","8080"));site=web.TCPSite(runner,"0.0.0.0",port);await site.start();log.info("Webhook listening on port %s",port);return runner
 
 async def main():
-    await init_db();runner=await run_webhook_server()
+    await init_db();await bot.set_my_commands([BotCommand(command="start",description="Open Shop Menu"),BotCommand(command="admin",description="Admin control panel")]);runner=await run_webhook_server()
     try:await dp.start_polling(bot)
-    finally:await runner.cleanup();await bot.session.close()
+    finally:
+        await runner.cleanup()
+        await close_cashfree_session()
+        await bot.session.close()
 
 if __name__=="__main__":asyncio.run(main())

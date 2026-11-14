@@ -32,6 +32,8 @@ class User(Base):
     wallet_balance: Mapped[float] = mapped_column(Numeric(12,2), default=0)
     is_reseller: Mapped[bool] = mapped_column(Boolean, default=False)
     phone: Mapped[str | None] = mapped_column(String(10))
+    referred_by: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    referral_rewarded: Mapped[bool] = mapped_column(Boolean, default=False)
 
 class Product(Base):
     __tablename__ = "products"
@@ -104,11 +106,31 @@ class BotSetting(Base):
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
 
+class ReferralKeyStock(Base):
+    __tablename__ = "referral_key_stock"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reward_type: Mapped[str] = mapped_column(String(20), index=True)
+    key_text: Mapped[str] = mapped_column(Text, unique=True)
+    status: Mapped[str] = mapped_column(String(16), default="AVAILABLE", index=True)
+    claimed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class ReferralReward(Base):
+    __tablename__ = "referral_rewards"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    referrer_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    referred_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    reward_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    key_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
 class Order(Base):
     __tablename__ = "orders"
     order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.user_id"), index=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
     amount_inr: Mapped[float] = mapped_column(Numeric(10,2))
     status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
     key_text: Mapped[str | None] = mapped_column(Text)
@@ -128,12 +150,15 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_reseller BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(10)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_rewarded BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Other Products'",
             "ALTER TABLE key_stock ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS duration VARCHAR(80) NOT NULL DEFAULT '1 Day'",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'CASHFREE'",
+            "ALTER TABLE orders ALTER COLUMN product_id DROP NOT NULL",
         ]
         for statement in migrations:
             await conn.execute(text(statement))
@@ -141,16 +166,18 @@ async def init_db():
 async def get_or_create_user(user_id, username, full_name):
     async with Session() as s:
         user = await s.get(User, user_id)
+        created = user is None
         if not user:
             s.add(User(user_id=user_id, username=username, full_name=full_name))
         else:
             user.username, user.full_name = username, full_name
         await s.commit()
+        return created
 
 async def get_user(user_id):
     async with Session() as s:
         u = await s.get(User, user_id)
-        return {"user_id":u.user_id,"wallet_balance":float(u.wallet_balance or 0),"is_reseller":u.is_reseller,"is_banned":u.is_banned,"phone":u.phone} if u else None
+        return {"user_id":u.user_id,"username":u.username,"full_name":u.full_name,"created_at":u.created_at,"wallet_balance":float(u.wallet_balance or 0),"is_reseller":u.is_reseller,"is_banned":u.is_banned,"phone":u.phone} if u else None
 
 async def set_user_phone(user_id, phone):
     async with Session() as s:
@@ -255,7 +282,10 @@ async def fulfill_paid_order(order_id):
         async with s.begin():
             order=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
             if not order:return None
-            if order.status=="PAID":return {"key_text":order.key_text,"user_id":order.user_id}
+            # Idempotency: never return a previously delivered key on a repeated
+            # Cashfree webhook / status check. Concurrent duplicate callbacks can
+            # both read PENDING before this row lock; the second must not resend.
+            if order.status=="PAID":return {"key_text":None,"user_id":order.user_id,"already_paid":True}
             if order.status not in ("PENDING","EXPIRED"):return None
             result=await _fulfill_locked(s,order)
             if not result:
@@ -284,6 +314,61 @@ async def credit_wallet_for_no_stock(order_id):
                                     note=f"Automatic no-stock refund {order_id}",admin_id=None))
             order.status="REFUNDED"
             return {"credited":True,"user_id":order.user_id,"amount":amount}
+
+async def add_referral_stock(reward_type, keys):
+    reward_type=(reward_type or "").strip().upper()
+    if reward_type not in ("ROOT", "NON_ROOT"): return 0
+    async with Session() as s:
+        existing=set((await s.scalars(select(ReferralKeyStock.key_text))).all())
+        new_keys=[k for k in dict.fromkeys(keys) if k not in existing]
+        s.add_all([ReferralKeyStock(reward_type=reward_type,key_text=k,status="AVAILABLE") for k in new_keys])
+        await s.commit();return len(new_keys)
+
+async def attach_referrer(user_id, referrer_id):
+    if not referrer_id or int(referrer_id)==int(user_id): return False
+    async with Session() as s:
+        async with s.begin():
+            u=await s.scalar(select(User).where(User.user_id==user_id).with_for_update())
+            r=await s.get(User,int(referrer_id))
+            if not u or not r or u.referred_by or u.referral_rewarded: return False
+            # Only attach on first registration, before any paid order.
+            prior=int(await s.scalar(select(func.count(Order.order_id)).where(Order.user_id==user_id,Order.status=="PAID")) or 0)
+            if prior: return False
+            u.referred_by=int(referrer_id)
+            return True
+
+async def award_referral_after_purchase(referred_user_id):
+    """Create one pending reward for a referrer after their invitee's first paid purchase."""
+    async with Session() as s:
+        async with s.begin():
+            u=await s.scalar(select(User).where(User.user_id==referred_user_id).with_for_update())
+            if not u or not u.referred_by or u.referral_rewarded: return None
+            # The caller invokes this only after a key was successfully delivered.
+            u.referral_rewarded=True
+            reward=ReferralReward(referrer_id=u.referred_by,referred_user_id=referred_user_id,status="PENDING")
+            s.add(reward);await s.flush()
+            return {"referrer_id":u.referred_by,"reward_id":reward.id}
+
+async def referral_stats(user_id):
+    async with Session() as s:
+        total=int(await s.scalar(select(func.count(User.user_id)).where(User.referred_by==user_id)) or 0)
+        active=int(await s.scalar(select(func.count(User.user_id)).where(User.referred_by==user_id,User.referral_rewarded==True)) or 0)
+        trials=int(await s.scalar(select(func.count(ReferralReward.id)).where(ReferralReward.referrer_id==user_id,ReferralReward.status=="CLAIMED")) or 0)
+        pending=int(await s.scalar(select(func.count(ReferralReward.id)).where(ReferralReward.referrer_id==user_id,ReferralReward.status=="PENDING")) or 0)
+        return {"total":total,"active":active,"trials":trials,"pending":pending}
+
+async def claim_referral_reward(user_id, reward_type):
+    reward_type=(reward_type or "").strip().upper()
+    if reward_type not in ("ROOT","NON_ROOT"): return None
+    async with Session() as s:
+        async with s.begin():
+            reward=await s.scalar(select(ReferralReward).where(ReferralReward.referrer_id==user_id,ReferralReward.status=="PENDING").order_by(ReferralReward.id).with_for_update(skip_locked=True).limit(1))
+            if not reward: return {"error":"NO_REWARD"}
+            key=await s.scalar(select(ReferralKeyStock).where(ReferralKeyStock.reward_type==reward_type,ReferralKeyStock.status=="AVAILABLE").order_by(func.random()).with_for_update(skip_locked=True).limit(1))
+            if not key: return {"error":"NO_STOCK"}
+            key.status="CLAIMED";key.claimed_by=user_id
+            reward.reward_type=reward_type;reward.key_text=key.key_text;reward.status="CLAIMED";reward.claimed_at=datetime.now(timezone.utc)
+            return {"key_text":key.key_text,"reward_type":reward_type,"reward_id":reward.id}
 
 async def add_product(name, price, description, category="Other Products"):
     async with Session() as s:
@@ -315,10 +400,36 @@ async def add_stock(plan_id, keys):
 
 async def list_orders(user_id):
     async with Session() as s:
-        stmt=select(Order).order_by(Order.created_at.desc()).limit(30)
-        if user_id is not None:stmt=stmt.where(Order.user_id==user_id)
-        rows=(await s.scalars(stmt)).all()
-        return [{"order_id":o.order_id,"user_id":o.user_id,"amount_inr":float(o.amount_inr),"status":o.status,"duration":o.duration,"quantity":o.quantity} for o in rows]
+        stmt=(select(Order, Product.name).outerjoin(Product, Product.id==Order.product_id).where(Order.user_id==user_id, Order.payment_method!="TOPUP").order_by(Order.created_at.desc()).limit(30))
+        rows=(await s.execute(stmt)).all()
+        return [{"order_id":o.order_id,"user_id":o.user_id,"product_name":name or "Wallet Balance Top-up","amount_inr":float(o.amount_inr),"status":o.status,"duration":o.duration,"quantity":o.quantity,"key_text":o.key_text,"created_at":o.created_at,"payment_method":o.payment_method} for o,name in rows]
+
+async def create_topup_order(user_id, amount):
+    order_id="PA-TOPUP-"+secrets.token_hex(7).upper()
+    async with Session() as s:
+        s.add(Order(order_id=order_id,user_id=user_id,product_id=None,plan_id=None,duration="Wallet Balance",quantity=1,amount_inr=round(float(amount),2),status="PENDING",payment_method="TOPUP"))
+        await s.commit()
+    return {"order_id":order_id}
+
+async def fulfill_wallet_topup(order_id):
+    async with Session() as s:
+        async with s.begin():
+            o=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
+            if not o or o.payment_method!="TOPUP": return None
+            if o.status=="PAID": return {"credited":False,"user_id":o.user_id,"amount":float(o.amount_inr)}
+            if o.status not in ("PENDING","EXPIRED"): return None
+            u=await s.scalar(select(User).where(User.user_id==o.user_id).with_for_update())
+            if not u:return None
+            u.wallet_balance=float(u.wallet_balance or 0)+float(o.amount_inr)
+            o.status="PAID";o.paid_at=datetime.now(timezone.utc)
+            s.add(WalletTransaction(user_id=o.user_id,amount=o.amount_inr,kind="CREDIT",note=f"Cashfree wallet top-up {order_id}",admin_id=None))
+            return {"credited":True,"user_id":o.user_id,"amount":float(o.amount_inr)}
+
+async def user_order_stats(user_id):
+    async with Session() as s:
+        count=int(await s.scalar(select(func.count(Order.order_id)).where(Order.user_id==user_id,Order.status=="PAID",Order.payment_method!="TOPUP")) or 0)
+        spent=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.user_id==user_id,Order.status=="PAID",Order.payment_method!="TOPUP")) or 0)
+        return {"orders":count,"spent":spent}
 
 async def set_reseller(user_id, enabled=True):
     async with Session() as s:

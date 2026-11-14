@@ -9,29 +9,48 @@ from config import CASHFREE_APP_ID, CASHFREE_SECRET_KEY, CASHFREE_ENV, PUBLIC_BA
 API_BASE = "https://sandbox.cashfree.com/pg" if CASHFREE_ENV == "sandbox" else "https://api.cashfree.com/pg"
 API_VERSION = "2022-09-01"
 
+# Reuse one keep-alive connection pool across checkout requests. Creating a new
+# ClientSession for every customer adds DNS/TLS setup latency.
+_http_session = None
+
+def _timeout():
+    return aiohttp.ClientTimeout(total=22, connect=8, sock_connect=8, sock_read=18)
+
+async def _get_session():
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300, keepalive_timeout=30)
+        _http_session = aiohttp.ClientSession(timeout=_timeout(), connector=connector)
+    return _http_session
+
+async def close_cashfree_session():
+    global _http_session
+    if _http_session is not None and not _http_session.closed:
+        await _http_session.close()
+    _http_session = None
+
 def _headers():
     return {"x-client-id": CASHFREE_APP_ID, "x-client-secret": CASHFREE_SECRET_KEY, "x-api-version": API_VERSION, "Content-Type": "application/json"}
 
-async def create_upi_qr_order(order_id: str, amount: float, telegram_user_id: int, customer_name: str, phone: str):
+async def create_upi_qr_order(order_id: str, amount: float, telegram_user_id: int, customer_name: str, phone: str, payment_description: str = "Panel Army purchase"):
     """Create a Cashfree PG order, then initiate its UPI QR payment."""
     payload = {
         "order_id": order_id, "order_amount": round(float(amount), 2), "order_currency": "INR",
         "customer_details": {"customer_id": f"tg_{telegram_user_id}", "customer_name": (customer_name or "Telegram User")[:100], "customer_phone": phone},
         "order_meta": {"notify_url": f"{PUBLIC_BASE_URL}/cashfree/webhook", "return_url": "https://t.me/"},
         "order_expiry_time": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(timespec="seconds"),
-        "order_note": f"Panel Army {order_id}",
+        "order_note": (payment_description or f"Panel Army {order_id}")[:200],
     }
-    timeout=aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{API_BASE}/orders",headers=_headers(),json=payload) as resp:
-            created=await resp.json(content_type=None)
-            if resp.status not in (200,201): raise RuntimeError(f"Cashfree create order error {resp.status}: {created}")
-        session_id=created.get("payment_session_id")
-        if not session_id: raise RuntimeError(f"Cashfree response missing payment_session_id: {created}")
-        pay_payload={"payment_session_id":session_id,"payment_method":{"upi":{"channel":"qrcode"}}}
-        async with session.post(f"{API_BASE}/orders/sessions",headers=_headers(),json=pay_payload) as resp:
-            paid=await resp.json(content_type=None)
-            if resp.status not in (200,201): raise RuntimeError(f"Cashfree QR initiation error {resp.status}: {paid}")
+    session = await _get_session()
+    async with session.post(f"{API_BASE}/orders",headers=_headers(),json=payload) as resp:
+        created=await resp.json(content_type=None)
+        if resp.status not in (200,201): raise RuntimeError(f"Cashfree create order error {resp.status}: {created}")
+    session_id=created.get("payment_session_id")
+    if not session_id: raise RuntimeError(f"Cashfree response missing payment_session_id: {created}")
+    pay_payload={"payment_session_id":session_id,"payment_method":{"upi":{"channel":"qrcode"}}}
+    async with session.post(f"{API_BASE}/orders/sessions",headers=_headers(),json=pay_payload) as resp:
+        paid=await resp.json(content_type=None)
+        if resp.status not in (200,201): raise RuntimeError(f"Cashfree QR initiation error {resp.status}: {paid}")
     # Cashfree can return either a UPI string or an image data URI. In the
     # response shape used by QR initiation, the image is at
     # data.payload.qrcode (for example: data:image/png;base64,...).
@@ -77,12 +96,11 @@ async def create_upi_qr_order(order_id: str, amount: float, telegram_user_id: in
     return result
 
 async def fetch_order_payments(order_id: str):
-    timeout=aiohttp.ClientTimeout(total=25)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(f"{API_BASE}/orders/{order_id}/payments",headers=_headers()) as response:
-            body=await response.json(content_type=None)
-            if response.status!=200: raise RuntimeError(f"Cashfree fetch payments error {response.status}: {body}")
-            return body
+    session = await _get_session()
+    async with session.get(f"{API_BASE}/orders/{order_id}/payments",headers=_headers()) as response:
+        body=await response.json(content_type=None)
+        if response.status!=200: raise RuntimeError(f"Cashfree fetch payments error {response.status}: {body}")
+        return body
 
 def verify_webhook_signature(timestamp: str, raw_body: bytes, signature: str) -> bool:
     if not timestamp or not signature:return False

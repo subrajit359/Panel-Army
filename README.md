@@ -33,7 +33,7 @@ Set these in Railway:
 - `/orders`
 - `/cancel`
 
-The shop flow includes category → product → duration plan → wallet or Cashfree UPI checkout. Cashfree payment links are displayed as a QR code and online-payment button, with a five-minute expiry. Verified payments fulfill keys automatically. Wallet purchases debit and fulfill within a database transaction.
+The shop flow includes category → product → duration plan → wallet or UPI / Paytm (INR) checkout via Cashfree. Cashfree payment links are displayed as a QR code and online-payment button, with a five-minute expiry. Verified payments fulfill keys automatically. Wallet purchases debit and fulfill within a database transaction.
 
 ## Important production hardening
 - Cashfree webhook signature verification is included. The webhook queries Cashfree Payment Links API status and amount before fulfillment. Test event payloads with your Cashfree sandbox dashboard before live use.
@@ -66,3 +66,24 @@ Open `/admin` as an account listed in `ADMIN_IDS` to use the inline admin menu. 
 - `/broadcast_resellers` — start a reseller-only broadcast; `/admin` → Broadcast sends to all non-banned users.
 
 New tables for wallet transactions, coupons, bot settings, refund records and admin logs are created automatically by SQLAlchemy `create_all`; existing tables are not dropped. Back up the database before deploying schema changes.
+
+
+## Latest customer menu update
+- `/start` is listed as **Open Shop Menu** and returns verified users to the full store welcome screen.
+- Dashboard/back navigation returns to the store welcome screen.
+- Profile and order history show wallet, purchase statistics, delivered keys, dates, and order status.
+- Bulk checkout supports quantities 1, 5, 10, 15, and a custom quantity, limited by available stock.
+- Wallet top-ups support ₹10, ₹20, ₹50, ₹100, or a custom amount (minimum ₹10) through Cashfree UPI QR. Successful top-ups are credited once via webhook or manual status check.
+- Support screen points to @subro98.
+
+The database startup migration makes `orders.product_id` nullable so wallet top-up records can share the existing payment tracking table. Existing order and user data are preserved.
+
+
+## Referral rewards
+- Each customer has a unique Telegram deep link: `https://t.me/panelxarmy_bot?start=ref_USER_ID`.
+- A new user is attributed only once, cannot refer themselves, and must join through the link before making a paid purchase.
+- After that referred user's first successful key delivery (Cashfree or wallet), the referrer receives one pending trial-key reward.
+- The referrer chooses Root or Non-Root. The bot randomly reserves one available key from a product whose name/category identifies it as Root or Non-Root.
+- Admins add referral trial keys through **🎁 Reward Key Stock** in the admin menu. Root and Non-Root reward inventories are separate from normal shop inventory. If the selected type has no available reward key, the reward stays pending until stock is added.
+- Existing users are not retroactively assigned a referrer. Referral counts and claimed trial keys are stored in PostgreSQL.
+
