@@ -255,7 +255,9 @@ async def list_products(category=None, include_empty=False):
     async with Session() as s:
         product_stmt = select(Product).where(Product.active == True).order_by(Product.id)
         if category:
-            product_stmt = product_stmt.where(Product.category == category)
+            # Match category names robustly if older rows contain accidental
+            # whitespace/case differences from previous admin versions.
+            product_stmt = product_stmt.where(func.lower(func.trim(Product.category)) == str(category).strip().lower())
         products = (await s.scalars(product_stmt)).all()
         if not products:
             return []
@@ -500,10 +502,22 @@ async def claim_referral_reward(user_id, reward_type):
             return {"key_text":key.key_text,"reward_type":reward_type,"reward_id":reward.id}
 
 async def add_product(name, price, description, category="Other Products"):
+    # Normalize and persist category explicitly so newly created products are
+    # immediately visible in the customer catalogue and admin category list.
+    name=(name or "").strip()
+    category=(category or "Other Products").strip()
+    if not name or len(name)>160 or not category or len(category)>100:
+        raise ValueError("Invalid product name or category")
     async with Session() as s:
-        p=Product(name=name,price_inr=price,description=description,category=category)
-        s.add(p);await s.commit();await s.refresh(p)
-        return {"id":p.id,"name":p.name}
+        async with s.begin():
+            cat=await s.get(ProductCategory, category)
+            if not cat:
+                s.add(ProductCategory(name=category))
+            p=Product(name=name,price_inr=price,description=description or "",category=category,active=True,maintenance=False)
+            s.add(p)
+            await s.flush()
+            result={"id":p.id,"name":p.name,"category":p.category,"active":bool(p.active)}
+        return result
 
 async def add_plan(product_id,duration,price_inr,price_usd,reseller_price_inr,reseller_price_usd):
     async with Session() as s:
