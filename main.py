@@ -577,10 +577,10 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         await state.set_state(AdminState.admin_input);await state.update_data(admin_action="wallet")
         msg="💰 <b>Wallet control</b>\nSend <code>USER_ID | AMOUNT</code>. Use a positive amount to credit and a negative amount to deduct."
     elif section=="products":
-        products=await admin_all_products()
-        rows=[[InlineKeyboardButton(text=f"{'🛠️' if p.get('maintenance') else '📦'} {p['name']} · {p['category']}",callback_data=f"ac:product:{p['id']}")] for p in products]
-        rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproduct")],[InlineKeyboardButton(text="📁 Manage categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
-        await call.message.edit_text("📦 <b>PRODUCT & CATEGORY MANAGEMENT</b>\nSelect an item to edit or deactivate it.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, );return
+        cats=[c["name"] for c in await list_categories()]
+        rows=[[InlineKeyboardButton(text=f"📁 {name}",callback_data=f"ac:category:{i}")] for i,name in enumerate(cats)]
+        rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        await call.message.edit_text("📦 <b>PRODUCT MANAGEMENT</b>\n\nChoose a category to view its products, or add/manage categories.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call);return
     elif section=="stock":
         rows=await admin_stock_summary()
         msg="🔑 <b>Key stock & inventory</b>\n\nChoose a guided action below. You can select an existing category, product and plan, or create any missing item without typing commands.\n\n"+("\n".join(f"Plan {r['plan_id']}: {r['status']} — {r['count']}" for r in rows) if rows else "No stock records yet.")
@@ -695,13 +695,59 @@ async def admin_res_toggle(call:CallbackQuery):
 
 @dp.callback_query(F.data=="ac:categories")
 async def ac_categories(call:CallbackQuery):
-    if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
     cats=[c["name"] for c in await list_categories()]
-    rows=[[InlineKeyboardButton(text=f"📁 {c}",callback_data="ac:category:"+str(i))] for i,c in enumerate(cats)]
-    rows.append([InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory")])
-    rows.append([InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]); rows += admin_nav_rows()
-    await call.message.edit_text("📁 <b>Categories</b>\nSelect a category to rename or move its products.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
-    # Store names per admin in FSM is not needed: callback index resolves from fresh sorted list.
+    rows=[[InlineKeyboardButton(text=f"⚙️ {name}",callback_data=f"ac:categorymanage:{i}")] for i,name in enumerate(cats)]
+    rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]]
+    await call.message.edit_text("⚙️ <b>MANAGE CATEGORIES</b>\nChoose a category to rename or delete.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call)
+
+async def show_admin_category_products(target, category):
+    products=await list_products(category=category,include_empty=True)
+    rows=[[InlineKeyboardButton(text=f"{'🛠️' if p.get('maintenance') else '📦'} {p['name']}",callback_data=f"ac:product:{p['id']}")] for p in products]
+    rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproductcat")],[InlineKeyboardButton(text="⚙️ Manage this category",callback_data="ac:categorymanage_name")],[InlineKeyboardButton(text="🔙 Categories",callback_data="adm:products")]]
+    await target.edit_text(f"📁 <b>{html.escape(category)}</b>\n\n📦 <b>PRODUCTS</b>\nSelect a product or add a new one.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(F.data.startswith("ac:category:"))
+async def ac_category_products(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
+    cats=[c["name"] for c in await list_categories()]
+    try:name=cats[int(call.data.rsplit(":",1)[1])]
+    except (ValueError,IndexError):await callback_answer(call,"Category list changed. Refresh.",show_alert=True);return
+    await state.update_data(admin_category=name)
+    await show_admin_category_products(call.message,name);await callback_answer(call)
+
+@dp.callback_query(F.data=="ac:addproductcat")
+async def ac_add_product_to_category(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
+    data=await state.get_data();category=data.get("admin_category")
+    if not category:await callback_answer(call,"Choose a category first.",show_alert=True);return
+    await state.update_data(stock_category=category);await state.set_state(AdminState.stock_product_name)
+    await call.message.edit_text(f"➕ <b>ADD PRODUCT</b>\nCategory: <b>{html.escape(category)}</b>\n\nSend the product name. /cancel to stop.");await callback_answer(call)
+
+@dp.callback_query(F.data=="ac:categorymanage_name")
+async def ac_category_manage_selected(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
+    data=await state.get_data();name=data.get("admin_category")
+    if not name:await callback_answer(call,"Choose a category first.",show_alert=True);return
+    count=await category_products_admin(name);await state.update_data(category_name=name)
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete")],[InlineKeyboardButton(text="🔙 Products in category",callback_data="ac:categoryback")]])
+    await call.message.edit_text(f"⚙️ <b>{html.escape(name)}</b>\nProducts: {count}",reply_markup=kb);await callback_answer(call)
+
+@dp.callback_query(F.data=="ac:categoryback")
+async def ac_category_back(call:CallbackQuery,state:FSMContext):
+    data=await state.get_data();name=data.get("admin_category")
+    if not name:await callback_answer(call,"Choose a category again.",show_alert=True);return
+    await show_admin_category_products(call.message,name);await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("ac:categorymanage:"))
+async def ac_category_manage(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
+    cats=[c["name"] for c in await list_categories()]
+    try:name=cats[int(call.data.rsplit(":",1)[1])]
+    except (ValueError,IndexError):await callback_answer(call,"Category list changed. Refresh.",show_alert=True);return
+    await state.update_data(category_name=name,admin_category=name);count=await category_products_admin(name)
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete")],[InlineKeyboardButton(text="🔙 Manage categories",callback_data="ac:categories")]])
+    await call.message.edit_text(f"⚙️ <b>{html.escape(name)}</b>\nProducts: {count}",reply_markup=kb);await callback_answer(call)
 
 @dp.callback_query(F.data=="ac:addcategory")
 async def ac_add_category(call:CallbackQuery,state:FSMContext):
@@ -744,8 +790,15 @@ async def ac_product_detail(call:CallbackQuery):
     if not p:await callback_answer(call, "Product not found or inactive",show_alert=True);return
     plans=await admin_all_plans(pid)
     rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}")] for pl in plans]
-    rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]] + admin_nav_rows()
+    rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}")]] + admin_nav_rows()
     await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nCategory: {html.escape(p['category'])}\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nChoose a plan or action:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
+
+@dp.callback_query(F.data.startswith("ac:categorybackpid:"))
+async def ac_category_back_from_product(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
+    pid=int(call.data.rsplit(":",1)[1]);p=await get_product(pid)
+    if not p:await callback_answer(call,"Product not found",show_alert=True);return
+    await state.update_data(admin_category=p["category"]);await show_admin_category_products(call.message,p["category"]);await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("ac:maintenance:"))
 async def ac_product_maintenance(call:CallbackQuery):
@@ -757,7 +810,7 @@ async def ac_product_maintenance(call:CallbackQuery):
     if p:
         plans=await admin_all_plans(pid)
         rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}")] for pl in plans]
-        rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]] + admin_nav_rows()
+        rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}")]] + admin_nav_rows()
         await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nCategory: {html.escape(p['category'])}",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback_answer(call,"Updated")
 
@@ -966,7 +1019,7 @@ async def admin_button_input(message:Message,state:FSMContext):
         elif action=="category_create":
             ok=await create_category_admin(raw)
             await admin_log(message.from_user.id,"CATEGORY_CREATE",raw) if ok else None
-            await message.answer("✅ Category created. You can now assign products to it." if ok else "❌ Category already exists or the name is invalid.",reply_markup=admin_keyboard())
+            await message.answer("✅ Category created. Open Products to select it." if ok else "❌ Category already exists or the name is invalid.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Open Products",callback_data="adm:products")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories")]]))
         elif action=="category_rename":
             old=data["category_name"];ok=await rename_category_admin(old,raw)
             await message.answer("✅ Category renamed." if ok else "Category not found or the new name already exists.",reply_markup=admin_keyboard())
@@ -1133,7 +1186,8 @@ async def stock_product_name(message:Message,state:FSMContext):
         # Product descriptions are optional; create the product with a blank description.
         p=await add_product(name,0,"",data['stock_category'])
         await admin_log(message.from_user.id,"PRODUCT_CREATE",f"{p['id']} {p['name']} category={data['stock_category']}")
-        await message.answer(f"✅ Product created: <b>{html.escape(p['name'])}</b>")
+        await message.answer(f"✅ Product created: <b>{html.escape(p['name'])}</b>\nCategory: <b>{html.escape(data['stock_category'])}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 View products in this category",callback_data="ac:categoryback")],[InlineKeyboardButton(text="🏠 Products",callback_data="adm:products")]]))
+        await state.update_data(admin_category=data['stock_category'])
         await show_stock_plans(message,state,p['id'])
     except Exception:
         log.exception("Guided product creation failed");await message.answer("Could not create product. Please try again or contact support.");await state.clear()
