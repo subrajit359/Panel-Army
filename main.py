@@ -18,7 +18,7 @@ from db import (init_db, close_db, is_user_banned, get_or_create_user, list_cate
                 admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
                 set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
                 set_bot_setting, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats, list_resellers, list_coupons, update_coupon, delete_coupon, set_product_maintenance, delete_category_admin, delete_product_admin,
-                attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, rename_category_admin, category_products_admin)
+                attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, rename_category_admin, category_products_admin, create_category_admin)
 from cashfree import create_upi_qr_order, fetch_order_payments, verify_webhook_signature, close_cashfree_session
 
 logging.basicConfig(level=logging.INFO)
@@ -62,7 +62,8 @@ def admin_keyboard():
     ])
 
 def admin_nav_rows():
-    return [list(row) for row in admin_keyboard().inline_keyboard]
+    # Sub-pages should show only their contextual Back button, never the full admin menu.
+    return []
 
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -643,7 +644,7 @@ async def admin_payment_detail(call:CallbackQuery):
          f"💰 Amount: <b>₹{o['amount_inr']:.2f}</b>\n📌 Status: <b>{html.escape(o['status'])}</b>\n"
          f"🏦 Method: {html.escape(o['payment_method'])}\n📅 Created: {dt}\n"
          f"🔑 Key: <code>{html.escape(o.get('key_text') or 'Not delivered / wallet top-up')}</code>")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh status list",callback_data="admpay:list")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows())
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh status list",callback_data="admpay:list")],[InlineKeyboardButton(text="🔙 Payments",callback_data="adm:payments")]])
     await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, )
 
 @dp.message(AdminState.search_user,F.text)
@@ -695,16 +696,25 @@ async def admin_res_toggle(call:CallbackQuery):
 @dp.callback_query(F.data=="ac:categories")
 async def ac_categories(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
-    products=await admin_all_products();cats=sorted({p["category"] for p in products})
+    cats=[c["name"] for c in await list_categories()]
     rows=[[InlineKeyboardButton(text=f"📁 {c}",callback_data="ac:category:"+str(i))] for i,c in enumerate(cats)]
+    rows.append([InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory")])
     rows.append([InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]); rows += admin_nav_rows()
     await call.message.edit_text("📁 <b>Categories</b>\nSelect a category to rename or move its products.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
     # Store names per admin in FSM is not needed: callback index resolves from fresh sorted list.
 
+@dp.callback_query(F.data=="ac:addcategory")
+async def ac_add_category(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    await state.set_state(AdminState.admin_input)
+    await state.update_data(admin_action="category_create")
+    await call.message.answer("Send the new category name (1–100 characters):")
+    await callback_answer(call)
+
 @dp.callback_query(F.data.startswith("ac:category:"))
 async def ac_category_detail(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
-    products=await admin_all_products();cats=sorted({p["category"] for p in products})
+    cats=[c["name"] for c in await list_categories()]
     try:name=cats[int(call.data.rsplit(":",1)[1])]
     except (ValueError,IndexError):await callback_answer(call, "Category list changed. Refresh.",show_alert=True);return
     count=await category_products_admin(name)
@@ -725,7 +735,7 @@ async def ac_category_delete(call:CallbackQuery,state:FSMContext):
     if not old:await callback_answer(call, "Select category again.",show_alert=True);return
     ok=bool(await delete_category_admin(old))
     await admin_log(call.from_user.id,"CATEGORY_DELETE_MOVE",old)
-    await call.message.edit_text("✅ Category removed. Its products were moved to Other Products." if ok else "Category not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📁 Categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()));await callback_answer(call, )
+    await call.message.edit_text("✅ Category removed. Its products were moved to Other Products." if ok else "Category not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Categories",callback_data="ac:categories")]]));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("ac:product:"))
 async def ac_product_detail(call:CallbackQuery):
@@ -767,7 +777,7 @@ async def ac_editcat(call:CallbackQuery,state:FSMContext):
 async def ac_deleteproduct(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     pid=int(call.data.rsplit(":",1)[1])
-    await call.message.edit_text("⚠️ <b>Confirm product deletion</b>\nIf this product has orders or key inventory, it will be safely archived so historical records are not damaged. Otherwise it will be permanently deleted.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑️ Confirm delete",callback_data=f"ac:deleteconfirm:{pid}")],[InlineKeyboardButton(text="↩ Cancel",callback_data=f"ac:product:{pid}")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]])); await callback_answer(call)
+    await call.message.edit_text("⚠️ <b>Confirm product deletion</b>\nIf this product has orders or key inventory, it will be safely archived so historical records are not damaged. Otherwise it will be permanently deleted.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑️ Confirm delete",callback_data=f"ac:deleteconfirm:{pid}")],[InlineKeyboardButton(text="↩ Cancel",callback_data=f"ac:product:{pid}")]])); await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("ac:deleteconfirm:"))
 async def ac_deleteproduct_confirm(call:CallbackQuery):
@@ -775,7 +785,7 @@ async def ac_deleteproduct_confirm(call:CallbackQuery):
     pid=int(call.data.rsplit(":",1)[1]); result=await delete_product_admin(pid)
     if result!="NOT_FOUND": await admin_log(call.from_user.id,"PRODUCT_"+result,str(pid))
     msg={"DELETED":"✅ Product permanently deleted from the database.","ARCHIVED":"✅ Product archived because it has keys or order history. Existing records are preserved.","NOT_FOUND":"Product not found."}.get(result,"Could not delete product.")
-    await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Products",callback_data="adm:products")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows())); await callback_answer(call)
+    await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]])); await callback_answer(call)
 
 
 @dp.callback_query(F.data.startswith("ac:addplan:"))
@@ -803,7 +813,7 @@ async def ac_plan_delete(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     pid=int(call.data.rsplit(":",1)[1]);ok=await deactivate_plan_admin(pid)
     if ok:await admin_log(call.from_user.id,"PLAN_DEACTIVATE",str(pid))
-    await call.message.edit_text("✅ Plan deactivated. Historical orders are preserved." if ok else "Plan not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()));await callback_answer(call, )
+    await call.message.edit_text("✅ Plan deactivated. Historical orders are preserved." if ok else "Plan not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[]));await callback_answer(call, )
 
 @dp.callback_query(F.data=="ac:addproduct")
 async def ac_addproduct(call:CallbackQuery,state:FSMContext):
@@ -847,7 +857,7 @@ async def coupon_edit_start(call:CallbackQuery,state:FSMContext):
 async def coupon_delete(call:CallbackQuery):
     if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
     code=call.data.split(":",2)[2]; ok=await delete_coupon(code); await admin_log(call.from_user.id,"COUPON_DELETE",code)
-    await call.message.edit_text("✅ Coupon deleted." if ok else "Coupon not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟️ Coupons",callback_data="adm:coupons")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows())); await callback_answer(call)
+    await call.message.edit_text("✅ Coupon deleted." if ok else "Coupon not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons")]])); await callback_answer(call)
 
 @dp.callback_query(F.data=="setting:add")
 async def setting_add_start(call:CallbackQuery,state:FSMContext):
@@ -953,9 +963,13 @@ async def admin_button_input(message:Message,state:FSMContext):
         elif action=="product_category":
             pid=int(data["product_id"]);ok=await edit_product(pid,category=raw)
             await message.answer("✅ Product category updated." if ok else "Product not found.",reply_markup=admin_keyboard())
+        elif action=="category_create":
+            ok=await create_category_admin(raw)
+            await admin_log(message.from_user.id,"CATEGORY_CREATE",raw) if ok else None
+            await message.answer("✅ Category created. You can now assign products to it." if ok else "❌ Category already exists or the name is invalid.",reply_markup=admin_keyboard())
         elif action=="category_rename":
             old=data["category_name"];ok=await rename_category_admin(old,raw)
-            await message.answer("✅ Category renamed." if ok else "Category not found.",reply_markup=admin_keyboard())
+            await message.answer("✅ Category renamed." if ok else "Category not found or the new name already exists.",reply_markup=admin_keyboard())
         elif action=="plan_edit":
             pid=int(data["plan_id"]);duration,price,reseller=[x.strip() for x in raw.split("|")]
             ok=await edit_plan_admin(pid,duration,float(price),float(reseller))

@@ -57,6 +57,10 @@ class User(Base):
     referred_by: Mapped[int | None] = mapped_column(BigInteger, index=True)
     referral_rewarded: Mapped[bool] = mapped_column(Boolean, default=False)
 
+class ProductCategory(Base):
+    __tablename__ = "product_categories"
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+
 class Product(Base):
     __tablename__ = "products"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -228,8 +232,23 @@ async def set_user_phone(user_id, phone):
 
 async def list_categories():
     async with Session() as s:
-        rows = (await s.execute(select(Product.category, func.count(Product.id)).where(Product.active == True).group_by(Product.category).order_by(Product.category))).all()
-        return [{"name":name,"count":int(count)} for name,count in rows]
+        rows = (await s.execute(select(Product.category, func.count(Product.id)).where(Product.active == True).group_by(Product.category))).all()
+        counts = {name: int(count) for name, count in rows}
+        saved = (await s.scalars(select(ProductCategory.name).order_by(ProductCategory.name))).all()
+        for name in saved:
+            counts.setdefault(name, 0)
+        return [{"name": name, "count": counts[name]} for name in sorted(counts)]
+
+async def create_category_admin(name):
+    name=(name or "").strip()
+    if not name or len(name)>100: return False
+    async with Session() as s:
+        exists=await s.get(ProductCategory,name)
+        product_exists=await s.scalar(select(func.count(Product.id)).where(Product.category==name))
+        if exists or product_exists: return False
+        s.add(ProductCategory(name=name))
+        await s.commit()
+        return True
 
 async def list_products(category=None, include_empty=False):
     """Load the catalogue in a bounded number of queries (avoid per-plan N+1 counts)."""
@@ -739,10 +758,20 @@ async def deactivate_plan_admin(plan_id):
         p.active=False;await s.commit();return True
 
 async def rename_category_admin(old_name,new_name):
+    new_name=(new_name or "").strip()
+    if not new_name or len(new_name)>100:return False
     async with Session() as s:
         rows=(await s.scalars(select(Product).where(Product.category==old_name))).all()
-        if not rows:return False
-        for p in rows:p.category=new_name
+        category=await s.get(ProductCategory,old_name)
+        if not rows and not category:return False
+        if new_name != old_name:
+            collision=await s.get(ProductCategory,new_name)
+            product_collision=await s.scalar(select(func.count(Product.id)).where(Product.category==new_name))
+            if collision or product_collision:return False
+        for product in rows: product.category=new_name
+        if category:
+            await s.delete(category)
+        s.add(ProductCategory(name=new_name))
         await s.commit();return True
 
 async def category_products_admin(name):
@@ -780,7 +809,9 @@ async def delete_category_admin(name):
         result=await s.execute(select(Product).where(Product.category==name))
         rows=result.scalars().all()
         for product in rows: product.category="Other Products"
-        await s.commit();return len(rows)
+        category=await s.get(ProductCategory,name)
+        if category: await s.delete(category)
+        await s.commit();return len(rows) + (1 if category else 0)
 
 
 async def delete_product_admin(product_id):
