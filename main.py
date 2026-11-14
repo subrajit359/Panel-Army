@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram import BaseMiddleware
@@ -15,9 +15,9 @@ from db import (init_db, get_or_create_user, list_categories, list_products, get
                 create_order, get_order, fulfill_paid_order, credit_wallet_for_no_stock, add_product, add_plan, add_stock,
                 list_orders, get_user, pay_wallet, set_payment_link, expire_order, dashboard_stats, search_users,
                 admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
-                set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon,
+                set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
                 set_bot_setting, recent_admin_logs, admin_log, record_refund, refund_history, list_keys)
-from cashfree import create_payment_link, fetch_payment_link, verify_webhook_signature
+from cashfree import create_upi_qr_order, fetch_order_payments, verify_webhook_signature
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger("panel_army")
@@ -26,6 +26,9 @@ dp=Dispatcher()
 
 class CheckoutState(StatesGroup):
     waiting_phone=State()
+
+class ContactState(StatesGroup):
+    waiting_contact=State()
 
 class AdminState(StatesGroup):
     search_user=State()
@@ -122,8 +125,45 @@ dp.message.outer_middleware(BanGuard())
 dp.callback_query.outer_middleware(BanGuard())
 
 @dp.message(CommandStart())
-async def start(message:Message):
+async def start(message:Message,state:FSMContext):
     await get_or_create_user(message.from_user.id,message.from_user.username,message.from_user.full_name)
+    user=await get_user(message.from_user.id)
+    if not user or not user.get("phone"):
+        await state.set_state(ContactState.waiting_contact)
+        kb=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Verify My Number",request_contact=True)]],resize_keyboard=True,one_time_keyboard=True)
+        display_name=html.escape(message.from_user.first_name or "Customer")
+        verification_text=(
+            "🏪 <b>Panel Army Store</b>\n\n"
+            f"👋 Welcome, <b>{display_name}</b>!\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🔐 <b>IDENTITY CHECK NEEDED</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Before you explore our store, we need a quick verification.\n\n"
+            "🛡️ <b>Here's why:</b>\n"
+            "• Safeguard your orders\n"
+            "• Enable instant key delivery\n"
+            "• Keep your account protected\n\n"
+            "👇 <b>Tap the button below to get started:</b>"
+        )
+        await message.answer(verification_text,reply_markup=kb)
+        return
+    await state.clear()
+    await message.answer("🏪 ━━ Panel Army Store ━━ 🏪\n\n👋 Welcome, Customer!\n\n⭐ ━ STORE HIGHLIGHTS ━ ⭐\n\n│ 🔑 Premium Game Keys\n│ ⚡ Instant Delivery 24/7\n│ 🔒 100% Secure Payment\n│ 💰 Best Prices Guaranteed\n│ 🎁 Referral Rewards\n│ 📞 Professional Support\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🚀 Tap Shop Now to Start!",reply_markup=main_keyboard())
+
+@dp.message(ContactState.waiting_contact,F.contact)
+async def save_start_contact(message:Message,state:FSMContext):
+    contact=message.contact
+    if contact.user_id != message.from_user.id:
+        await message.answer("Please use the button to share your own Telegram contact.")
+        return
+    phone="".join(ch for ch in (contact.phone_number or "") if ch.isdigit())
+    if len(phone)==12 and phone.startswith("91"):phone=phone[2:]
+    if len(phone)!=10 or phone[0] not in "6789":
+        await message.answer("Please share a valid Indian mobile number using the button.")
+        return
+    await set_user_phone(message.from_user.id,phone)
+    await state.clear()
+    await message.answer("🛡️ <b>Identity Confirmed Successfully!</b>\n\n✅ Your phone number has been verified.\n🔒 Your account is now protected.\n⚡ You can now shop and receive instant key delivery.",reply_markup=ReplyKeyboardRemove())
     await message.answer("🏪 ━━ Panel Army Store ━━ 🏪\n\n👋 Welcome, Customer!\n\n⭐ ━ STORE HIGHLIGHTS ━ ⭐\n\n│ 🔑 Premium Game Keys\n│ ⚡ Instant Delivery 24/7\n│ 🔒 100% Secure Payment\n│ 💰 Best Prices Guaranteed\n│ 🎁 Referral Rewards\n│ 📞 Professional Support\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🚀 Tap Shop Now to Start!",reply_markup=main_keyboard())
 
 @dp.callback_query(F.data.in_({"shop","store"}))
@@ -192,36 +232,25 @@ async def wallet_pay(call:CallbackQuery):
 async def upi_begin(call:CallbackQuery,state:FSMContext):
     plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
     if not p or p['stock']<1:await call.answer("Out of stock.",show_alert=True);return
-    user=await get_user(call.from_user.id);amount=p['reseller_price_inr'] if user and user['is_reseller'] else p['price_inr']
+    user=await get_user(call.from_user.id)
+    if not user or not user.get("phone"):
+        await call.answer("Please restart the bot and share your phone number first.",show_alert=True);return
+    amount=p['reseller_price_inr'] if user and user['is_reseller'] else p['price_inr']
     order=await create_order(call.from_user.id,plan_id,amount,1,"CASHFREE")
-    await state.update_data(order_id=order['order_id'],plan_id=plan_id,amount=amount)
-    await state.set_state(CheckoutState.waiting_phone)
-    await call.message.answer(f"🧾 Order <code>{order['order_id']}</code>\n💰 Total: ₹{amount:.2f}\n\nSend your 10-digit Indian mobile number to generate Cashfree UPI payment QR.")
-    await call.answer()
-
-@dp.message(CheckoutState.waiting_phone,F.text)
-async def checkout_phone(message:Message,state:FSMContext):
-    phone="".join(ch for ch in message.text if ch.isdigit())
-    if len(phone)==12 and phone.startswith("91"):phone=phone[2:]
-    if len(phone)!=10 or phone[0] not in "6789":await message.answer("Please send a valid 10-digit Indian mobile number.");return
-    data=await state.get_data();order=await get_order(data['order_id'])
-    if not order or order['status']!="PENDING":await state.clear();await message.answer("This order is no longer pending. Please start a new purchase.");return
     try:
-        payment=await create_payment_link(data['order_id'],data['amount'],message.from_user.id,message.from_user.full_name or f"user{message.from_user.id}",phone)
-        await set_payment_link(data['order_id'],payment['payment_link'])
-        qr=qrcode.QRCode(box_size=8,border=3);qr.add_data(payment['payment_link']);qr.make(fit=True)
+        payment=await create_upi_qr_order(order['order_id'],amount,call.from_user.id,call.from_user.full_name or f"user{call.from_user.id}",user['phone'])
+        await set_payment_link(order['order_id'],payment['cashfree_order_id'])
+        qr=qrcode.QRCode(box_size=8,border=3);qr.add_data(payment['qr_value']);qr.make(fit=True)
         image=qr.make_image(fill_color="black",back_color="white")
         bio=BytesIO();image.save(bio,format="PNG");bio.seek(0)
-        caption=(f"💸 <b>Payment for {html.escape((await get_plan(data['plan_id']))['product_name'])} ({html.escape((await get_plan(data['plan_id']))['duration'])})</b>\n"
-                 f"📦 Quantity: 1 key\n💰 Total Amount (INR): ₹{data['amount']:.2f}\n🆔 Ref ID: <code>{data['order_id']}</code>\n\n"
-                 "📱 Scan this Cashfree QR or tap Pay Online.\n"
-                 "⚡ After successful payment verification, your key will be delivered here automatically — no need to press Check Payment Status.\n"
-                 "⏰ This order will expire in 5 minutes.")
-        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Pay Online (Cashfree)",url=payment['payment_link'])],[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{data['order_id']}")]])
-        await message.answer_photo(BufferedInputFile(bio.getvalue(),filename="cashfree_payment_qr.png"),caption=caption,reply_markup=kb)
+        caption=(f"💸 <b>Cashfree UPI Payment</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n🎮 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: 1 key\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan this unique QR using any UPI app.\n⚡ Your payment will be verified automatically and your key delivered here.\n⏰ Payment window: 5 minutes.")
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}")]])
+        await call.message.answer_photo(BufferedInputFile(bio.getvalue(),filename="cashfree_upi_qr.png"),caption=caption,reply_markup=kb)
     except Exception:
-        log.exception("Cashfree payment link creation failed");await message.answer("Could not create the Cashfree payment. Please retry your purchase.")
-    await state.clear()
+        log.exception("Cashfree UPI QR creation failed")
+        await expire_order(order['order_id'])
+        await call.message.answer("❌ Cashfree could not create the UPI QR for this order. No payment was taken. Please try again or contact support.")
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("check:"))
 async def check_payment(call:CallbackQuery):
@@ -232,9 +261,10 @@ async def check_payment(call:CallbackQuery):
         await call.answer("Payment was refunded to your wallet.",show_alert=True);return
     age=datetime.now(timezone.utc)-order['created_at'].astimezone(timezone.utc)
     try:
-        remote=await fetch_payment_link(order_id)
-        paid_amount=float(remote.get("link_amount_paid") or 0)
-        if remote.get("link_status")=="PAID" and abs(paid_amount-order['amount_inr'])<0.005:
+        remote=await fetch_order_payments(order_id)
+        payments=remote if isinstance(remote,list) else remote.get("payments",[]) if isinstance(remote,dict) else []
+        successful=next((x for x in payments if x.get("payment_status")=="SUCCESS" and abs(float(x.get("payment_amount") or 0)-order['amount_inr'])<0.005),None)
+        if successful:
             result=await fulfill_paid_order(order_id) if order['status'] in ("PENDING","EXPIRED") else {"key_text":None} if order['status']=="PAID_NO_STOCK" else None
             if result and result.get('key_text'):
                 plan=await get_plan(order['plan_id']) if order.get('plan_id') else None
@@ -702,8 +732,12 @@ async def admin_payment_check(message:Message):
     if not order:await message.answer("Order not found.");return
     if order["payment_method"]!="CASHFREE":await message.answer(f"{order_id}: {order['status']} (wallet payment)");return
     try:
-        remote=await fetch_payment_link(order_id)
-        await message.answer(f"🧾 <b>{order_id}</b>\nLocal status: {order['status']}\nCashfree status: {html.escape(str(remote.get('link_status','UNKNOWN')))}\nPaid amount: ₹{float(remote.get('link_amount_paid') or 0):.2f}\nOrder amount: ₹{order['amount_inr']:.2f}")
+        remote=await fetch_order_payments(order_id)
+        payments=remote if isinstance(remote,list) else remote.get("payments",[]) if isinstance(remote,dict) else []
+        successful=next((x for x in payments if x.get("payment_status")=="SUCCESS"),None)
+        status=successful.get("payment_status") if successful else (payments[-1].get("payment_status") if payments else "NO PAYMENT ATTEMPT")
+        paid=float(successful.get("payment_amount") or 0) if successful else 0.0
+        await message.answer(f"🧾 <b>{order_id}</b>\nLocal status: {order['status']}\nCashfree status: {html.escape(str(status))}\nPaid amount: ₹{paid:.2f}\nOrder amount: ₹{order['amount_inr']:.2f}")
     except Exception:
         log.exception("Admin Cashfree status lookup failed");await message.answer("Could not fetch status from Cashfree.")
 
@@ -735,22 +769,23 @@ async def run_webhook_server():
         raw=await request.read();timestamp=request.headers.get("x-webhook-timestamp","");signature=request.headers.get("x-webhook-signature","")
         if not verify_webhook_signature(timestamp,raw,signature):return web.Response(status=401,text="Invalid signature")
         try:
-            payload=json.loads(raw);data=payload.get("data",{});link_details=data.get("link_details",{}) or {}
-            order_id=link_details.get("link_id") or data.get("link_id") or payload.get("link_id") or (data.get("order",{}) or {}).get("order_id")
+            payload=json.loads(raw);data=payload.get("data",{}) or {};order_data=data.get("order",{}) or {}
+            order_id=order_data.get("order_id") or data.get("order_id") or payload.get("order_id")
             if order_id:
                 order=await get_order(order_id)
                 if order and order['status'] in ("PENDING","EXPIRED","PAID_NO_STOCK"):
-                    remote=await fetch_payment_link(order_id);paid_amount=float(remote.get("link_amount_paid") or 0)
-                    if remote.get("link_status")=="PAID" and abs(paid_amount-order['amount_inr'])<0.005:
+                    payments=await fetch_order_payments(order_id)
+                    rows=payments if isinstance(payments,list) else payments.get("payments",[]) if isinstance(payments,dict) else []
+                    successful=next((x for x in rows if x.get("payment_status")=="SUCCESS" and abs(float(x.get("payment_amount") or 0)-order['amount_inr'])<0.005),None)
+                    if successful:
                         result=await fulfill_paid_order(order_id) if order['status'] in ("PENDING","EXPIRED") else {"key_text":None}
                         if result and result.get("key_text"):
                             plan=await get_plan(order['plan_id']) if order.get('plan_id') else None
-                            game=plan['product_name'] if plan else "Product"
-                            await bot.send_message(order['user_id'],success_message(game,order['duration'],order['quantity'],result['key_text']))
+                            await bot.send_message(order['user_id'],success_message(plan['product_name'] if plan else "Product",order['duration'],order['quantity'],result['key_text']))
                         elif result and not result.get("key_text"):
                             refund=await credit_wallet_for_no_stock(order_id)
                             if refund and refund.get("credited"):
-                                await bot.send_message(order['user_id'],f"⚠️ <b>Out of Stock — Wallet Refunded</b>\n\nYour payment was successful, but the key ran out of stock.\n💰 <b>₹{refund['amount']:.2f}</b> has been added to your wallet automatically. You can use it for your next purchase.")
+                                await bot.send_message(order['user_id'],f"⚠️ <b>Out of Stock — Wallet Refunded</b>\n\nYour payment succeeded, but the key ran out of stock. ₹{refund['amount']:.2f} has been added to your wallet.")
                     elif order['status']=="PENDING" and datetime.now(timezone.utc)-order['created_at'].astimezone(timezone.utc)>timedelta(minutes=5):
                         await expire_order(order_id)
         except Exception:log.exception("Webhook processing failed");return web.Response(status=500,text="Webhook processing error")

@@ -31,6 +31,7 @@ class User(Base):
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     wallet_balance: Mapped[float] = mapped_column(Numeric(12,2), default=0)
     is_reseller: Mapped[bool] = mapped_column(Boolean, default=False)
+    phone: Mapped[str | None] = mapped_column(String(10))
 
 class Product(Base):
     __tablename__ = "products"
@@ -126,6 +127,7 @@ async def init_db():
         migrations = [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_reseller BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(10)",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Other Products'",
             "ALTER TABLE key_stock ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
@@ -148,7 +150,14 @@ async def get_or_create_user(user_id, username, full_name):
 async def get_user(user_id):
     async with Session() as s:
         u = await s.get(User, user_id)
-        return {"user_id":u.user_id,"wallet_balance":float(u.wallet_balance or 0),"is_reseller":u.is_reseller,"is_banned":u.is_banned} if u else None
+        return {"user_id":u.user_id,"wallet_balance":float(u.wallet_balance or 0),"is_reseller":u.is_reseller,"is_banned":u.is_banned,"phone":u.phone} if u else None
+
+async def set_user_phone(user_id, phone):
+    async with Session() as s:
+        u=await s.get(User,user_id)
+        if u:
+            u.phone=phone
+            await s.commit()
 
 async def list_categories():
     async with Session() as s:
