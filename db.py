@@ -8,7 +8,7 @@ from config import PUBLIC_BASE_URL
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is required. Set it to your Neon PostgreSQL connection string.")
+    raise RuntimeError("DATABASE_URL is required. Set it to your PostgreSQL connection string (AWS RDS is supported).")
 url = make_url(DATABASE_URL)
 if url.drivername in ("postgres", "postgresql"):
     url = url.set(drivername="postgresql+asyncpg")
@@ -17,7 +17,29 @@ query.pop("sslmode", None)
 query.pop("channel_binding", None)
 query.pop("ssl", None)
 url = url.set(query=query)
-engine = create_async_engine(url, pool_pre_ping=True, connect_args={"ssl": "require"})
+# Keep the async PostgreSQL pool warm for Railway/AWS Singapore deployments.
+# Values are environment-tunable so small RDS instances can keep a low connection cap.
+def _positive_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+_pool_size = _positive_int_env("DB_POOL_SIZE", 5, 1, 30)
+_max_overflow = _positive_int_env("DB_MAX_OVERFLOW", 5, 0, 30)
+_pool_timeout = _positive_int_env("DB_POOL_TIMEOUT", 8, 2, 60)
+_pool_recycle = _positive_int_env("DB_POOL_RECYCLE", 1800, 300, 7200)
+engine = create_async_engine(
+    url,
+    pool_pre_ping=True,
+    pool_size=_pool_size,
+    max_overflow=_max_overflow,
+    pool_timeout=_pool_timeout,
+    pool_recycle=_pool_recycle,
+    pool_use_lifo=True,
+    connect_args={"ssl": "require", "server_settings": {"application_name": "panel-army-bot"}},
+)
 Session = async_sessionmaker(engine, expire_on_commit=False)
 
 class Base(DeclarativeBase): pass
@@ -159,6 +181,14 @@ async def init_db():
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'CASHFREE'",
             "ALTER TABLE orders ALTER COLUMN product_id DROP NOT NULL",
+            "CREATE INDEX IF NOT EXISTS ix_key_stock_plan_status_id ON key_stock (plan_id, status, id)",
+            "CREATE INDEX IF NOT EXISTS ix_orders_user_created ON orders (user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_orders_status_created ON orders (status, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_products_active_category_id ON products (active, category, id)",
+            "CREATE INDEX IF NOT EXISTS ix_product_plans_product_active_id ON product_plans (product_id, active, id)",
+            "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_user_created ON wallet_transactions (user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_logs_created ON admin_logs (created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_referral_rewards_referrer_status ON referral_rewards (referrer_id, status)",
         ]
         for statement in migrations:
             await conn.execute(text(statement))
@@ -179,6 +209,14 @@ async def get_user(user_id):
         u = await s.get(User, user_id)
         return {"user_id":u.user_id,"username":u.username,"full_name":u.full_name,"created_at":u.created_at,"wallet_balance":float(u.wallet_balance or 0),"is_reseller":u.is_reseller,"is_banned":u.is_banned,"phone":u.phone} if u else None
 
+async def is_user_banned(user_id):
+    async with Session() as s:
+        value = await s.scalar(select(User.is_banned).where(User.user_id == user_id))
+        return bool(value) if value is not None else False
+
+async def close_db():
+    await engine.dispose()
+
 async def set_user_phone(user_id, phone):
     async with Session() as s:
         u=await s.get(User,user_id)
@@ -192,39 +230,106 @@ async def list_categories():
         return [{"name":name,"count":int(count)} for name,count in rows]
 
 async def list_products(category=None, include_empty=False):
+    """Load the catalogue in a bounded number of queries (avoid per-plan N+1 counts)."""
     async with Session() as s:
-        stmt = select(Product).where(Product.active == True).order_by(Product.id)
-        if category: stmt = stmt.where(Product.category == category)
-        products = (await s.scalars(stmt)).all()
-        output=[]
+        product_stmt = select(Product).where(Product.active == True).order_by(Product.id)
+        if category:
+            product_stmt = product_stmt.where(Product.category == category)
+        products = (await s.scalars(product_stmt)).all()
+        if not products:
+            return []
+        product_ids = [p.id for p in products]
+        plans = (await s.scalars(
+            select(ProductPlan).where(
+                ProductPlan.product_id.in_(product_ids), ProductPlan.active == True
+            ).order_by(ProductPlan.id)
+        )).all()
+        plan_ids = [pl.id for pl in plans]
+        stock_counts = {}
+        # Customer catalogue never displays stock, so skip the stock-count query there.
+        # Admin inventory views request include_empty=True and still receive exact counts.
+        if plan_ids and include_empty:
+            rows = (await s.execute(
+                select(KeyStock.plan_id, func.count(KeyStock.id))
+                .where(KeyStock.plan_id.in_(plan_ids), KeyStock.status == "AVAILABLE")
+                .group_by(KeyStock.plan_id)
+            )).all()
+            stock_counts = {int(pid): int(count) for pid, count in rows}
+        plans_by_product = {}
+        for pl in plans:
+            plans_by_product.setdefault(pl.product_id, []).append({
+                "id": pl.id, "duration": pl.duration,
+                "price_inr": float(pl.price_inr), "price_usd": float(pl.price_usd),
+                "reseller_price_inr": float(pl.reseller_price_inr),
+                "reseller_price_usd": float(pl.reseller_price_usd),
+                "stock": stock_counts.get(pl.id, 0),
+            })
+        output = []
         for p in products:
-            plans=(await s.scalars(select(ProductPlan).where(ProductPlan.product_id==p.id, ProductPlan.active==True).order_by(ProductPlan.id))).all()
-            stock_count=0
-            for plan in plans:
-                count=await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.plan_id==plan.id,KeyStock.status=="AVAILABLE"))
-                stock_count += int(count or 0)
-            if include_empty or stock_count>0 or plans:
-                output.append({"id":p.id,"name":p.name,"description":p.description,"category":p.category,"stock":stock_count,"plans":[{"id":pl.id,"duration":pl.duration,"price_inr":float(pl.price_inr),"price_usd":float(pl.price_usd),"reseller_price_inr":float(pl.reseller_price_inr),"reseller_price_usd":float(pl.reseller_price_usd),"stock":int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.plan_id==pl.id,KeyStock.status=="AVAILABLE")) or 0)} for pl in plans]})
+            product_plans = plans_by_product.get(p.id, [])
+            stock_count = sum(pl["stock"] for pl in product_plans)
+            if include_empty or stock_count > 0 or product_plans:
+                output.append({
+                    "id": p.id, "name": p.name, "description": p.description,
+                    "category": p.category, "stock": stock_count, "plans": product_plans,
+                })
         return output
 
 async def get_product(product_id):
+    """Fetch a customer-facing product and its plans in one round trip.
+
+    Stock is deliberately not queried here: the shop does not reveal availability,
+    and inventory is checked atomically only after successful payment.
+    """
     async with Session() as s:
-        p=await s.get(Product,product_id)
-        if not p or not p.active:return None
-        plans=(await s.scalars(select(ProductPlan).where(ProductPlan.product_id==p.id,ProductPlan.active==True).order_by(ProductPlan.id))).all()
-        return {"id":p.id,"name":p.name,"description":p.description,"category":p.category,"plans":[{"id":pl.id,"duration":pl.duration,"price_inr":float(pl.price_inr),"price_usd":float(pl.price_usd),"reseller_price_inr":float(pl.reseller_price_inr),"reseller_price_usd":float(pl.reseller_price_usd),"stock":int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.plan_id==pl.id,KeyStock.status=="AVAILABLE")) or 0)} for pl in plans]}
+        rows = (await s.execute(
+            select(Product, ProductPlan)
+            .outerjoin(ProductPlan, (ProductPlan.product_id == Product.id) & (ProductPlan.active == True))
+            .where(Product.id == product_id, Product.active == True)
+            .order_by(ProductPlan.id)
+        )).all()
+        if not rows:
+            return None
+        product = rows[0][0]
+        plans = [{
+            "id": pl.id, "duration": pl.duration,
+            "price_inr": float(pl.price_inr), "price_usd": float(pl.price_usd),
+            "reseller_price_inr": float(pl.reseller_price_inr),
+            "reseller_price_usd": float(pl.reseller_price_usd),
+            "stock": 0,
+        } for _, pl in rows if pl is not None]
+        return {
+            "id": product.id, "name": product.name, "description": product.description,
+            "category": product.category, "plans": plans,
+        }
 
 async def get_plan(plan_id):
     async with Session() as s:
-        pl=await s.get(ProductPlan,plan_id)
-        if not pl or not pl.active:return None
-        p=await s.get(Product,pl.product_id)
-        stock=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.plan_id==pl.id,KeyStock.status=="AVAILABLE")) or 0)
-        return {"id":pl.id,"product_id":pl.product_id,"product_name":p.name,"category":p.category,"description":p.description,"duration":pl.duration,"price_inr":float(pl.price_inr),"price_usd":float(pl.price_usd),"reseller_price_inr":float(pl.reseller_price_inr),"reseller_price_usd":float(pl.reseller_price_usd),"stock":stock}
+        stock_count = select(func.count(KeyStock.id)).where(
+            KeyStock.plan_id == ProductPlan.id, KeyStock.status == "AVAILABLE"
+        ).correlate(ProductPlan).scalar_subquery()
+        row = (await s.execute(
+            select(ProductPlan, Product, stock_count.label("stock"))
+            .join(Product, Product.id == ProductPlan.product_id)
+            .where(ProductPlan.id == plan_id, ProductPlan.active == True, Product.active == True)
+        )).first()
+        if not row:
+            return None
+        pl, p, stock = row
+        return {
+            "id": pl.id, "product_id": pl.product_id, "product_name": p.name,
+            "category": p.category, "description": p.description,
+            "duration": pl.duration, "price_inr": float(pl.price_inr),
+            "price_usd": float(pl.price_usd),
+            "reseller_price_inr": float(pl.reseller_price_inr),
+            "reseller_price_usd": float(pl.reseller_price_usd), "stock": int(stock or 0),
+        }
 
 async def create_order(user_id, plan_id, amount, quantity=1, payment_method="CASHFREE"):
     pl=await get_plan(plan_id)
-    if not pl or pl["stock"]<quantity: raise ValueError("Insufficient stock")
+    if not pl or quantity < 1 or quantity > 100: raise ValueError("Invalid plan or quantity (maximum 100)")
+    amount = round(float(amount), 2)
+    if amount <= 0 or amount > 500000: raise ValueError("Invalid order amount")
     order_id="PA-"+secrets.token_hex(8).upper()
     async with Session() as s:
         s.add(Order(order_id=order_id,user_id=user_id,product_id=pl["product_id"],plan_id=plan_id,duration=pl["duration"],quantity=quantity,amount_inr=amount,status="PENDING",payment_method=payment_method))
@@ -250,7 +355,7 @@ async def set_payment_link(order_id, url):
 async def pay_wallet(user_id, plan_id, quantity=1):
     pl=await get_plan(plan_id)
     user=await get_user(user_id)
-    if not pl or pl["stock"]<quantity: raise ValueError("Insufficient stock")
+    if not pl or quantity < 1 or quantity > 100: raise ValueError("Invalid plan or quantity (maximum 100)")
     price=pl["reseller_price_inr"] if user and user["is_reseller"] else pl["price_inr"]
     amount=round(price*quantity,2)
     order_id="PA-"+secrets.token_hex(8).upper()
@@ -265,10 +370,12 @@ async def pay_wallet(user_id, plan_id, quantity=1):
             await s.flush()
             result=await _fulfill_locked(s,o)
             if not result or not result.get("key_text"):
-                u.wallet_balance=float(u.wallet_balance or 0)+amount
-                o.status="FAILED"
-                raise ValueError("Stock changed; wallet charge rolled back")
-    return {"order_id":order_id,"amount_inr":amount,"key_text":result["key_text"],"product_name":pl["product_name"],"duration":pl["duration"],"quantity":quantity}
+                o.status="PAID_NO_STOCK"
+                o.paid_at=datetime.now(timezone.utc)
+                no_stock=True
+            else:
+                no_stock=False
+    return {"order_id":order_id,"amount_inr":amount,"key_text":result.get("key_text") if result else None,"product_name":pl["product_name"],"duration":pl["duration"],"quantity":quantity,"no_stock":no_stock}
 
 async def _fulfill_locked(s,o):
     keys=(await s.scalars(select(KeyStock).where(KeyStock.plan_id==o.plan_id,KeyStock.status=="AVAILABLE").order_by(KeyStock.id).with_for_update(skip_locked=True).limit(o.quantity))).all()
@@ -405,6 +512,9 @@ async def list_orders(user_id):
         return [{"order_id":o.order_id,"user_id":o.user_id,"product_name":name or "Wallet Balance Top-up","amount_inr":float(o.amount_inr),"status":o.status,"duration":o.duration,"quantity":o.quantity,"key_text":o.key_text,"created_at":o.created_at,"payment_method":o.payment_method} for o,name in rows]
 
 async def create_topup_order(user_id, amount):
+    amount = round(float(amount), 2)
+    if amount < 10 or amount > 50000:
+        raise ValueError("Top-up amount must be between ₹10 and ₹50,000")
     order_id="PA-TOPUP-"+secrets.token_hex(7).upper()
     async with Session() as s:
         s.add(Order(order_id=order_id,user_id=user_id,product_id=None,plan_id=None,duration="Wallet Balance",quantity=1,amount_inr=round(float(amount),2),status="PENDING",payment_method="TOPUP"))
@@ -588,3 +698,40 @@ async def list_keys(plan_id, status=None, limit=50):
         if status:stmt=stmt.where(KeyStock.status==status.upper())
         rows=(await s.scalars(stmt)).all()
         return [{"id":k.id,"status":k.status,"created_at":k.created_at,"order_id":k.order_id} for k in rows]
+
+# Button-driven catalogue administration
+async def admin_all_products():
+    async with Session() as s:
+        rows=(await s.scalars(select(Product).where(Product.active == True).order_by(Product.category,Product.id))).all()
+        return [{"id":p.id,"name":p.name,"category":p.category,"active":p.active} for p in rows]
+
+async def admin_all_plans(product_id):
+    async with Session() as s:
+        rows=(await s.scalars(select(ProductPlan).where(ProductPlan.product_id==product_id).order_by(ProductPlan.id))).all()
+        return [{"id":p.id,"duration":p.duration,"price_inr":float(p.price_inr),"reseller_price_inr":float(p.reseller_price_inr),"active":p.active} for p in rows]
+
+async def edit_plan_admin(plan_id, duration=None, price_inr=None, reseller_price_inr=None):
+    async with Session() as s:
+        p=await s.get(ProductPlan,plan_id)
+        if not p:return False
+        if duration is not None:p.duration=duration
+        if price_inr is not None:p.price_inr=price_inr
+        if reseller_price_inr is not None:p.reseller_price_inr=reseller_price_inr
+        await s.commit();return True
+
+async def deactivate_plan_admin(plan_id):
+    async with Session() as s:
+        p=await s.get(ProductPlan,plan_id)
+        if not p:return False
+        p.active=False;await s.commit();return True
+
+async def rename_category_admin(old_name,new_name):
+    async with Session() as s:
+        rows=(await s.scalars(select(Product).where(Product.category==old_name))).all()
+        if not rows:return False
+        for p in rows:p.category=new_name
+        await s.commit();return True
+
+async def category_products_admin(name):
+    async with Session() as s:
+        return int(await s.scalar(select(func.count(Product.id)).where(Product.category==name)) or 0)

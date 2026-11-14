@@ -6,7 +6,7 @@ This starter is a Telegram storefront for legitimate digital products/license ke
 Set these in Railway:
 - `BOT_TOKEN`: BotFather token
 - `ADMIN_IDS`: Telegram admin user IDs, comma-separated
-- `DATABASE_URL`: Railway PostgreSQL connection URL
+- `DATABASE_URL`: PostgreSQL connection URL (AWS RDS Singapore is supported; use the private/VPC route if Railway networking is configured for it)
 - `CASHFREE_APP_ID`
 - `CASHFREE_SECRET_KEY`
 - `CASHFREE_ENV`: `sandbox` while testing; `production` for live
@@ -24,7 +24,7 @@ Set these in Railway:
 - Open **Key Stock** → **Add / Update Key Stock** for the guided, button-first inventory workflow.
 - Select an existing category, or tap **Create new category**.
 - Select an existing product, or create a product and enter an optional description.
-- Select an existing plan, or create a plan by entering its duration and four prices (customer INR, customer USD, reseller INR, reseller USD).
+- Select an existing plan to edit its duration and INR prices, deactivate it, or upload more keys. Create plans with customer INR and reseller INR prices only.
 - Paste keys in bulk, one key per line. Duplicate keys are skipped and the result reports submitted, added, and duplicate counts.
 - `/addstock PLAN_ID` remains available as a legacy shortcut; it now uses the same state-based bulk upload flow.
 - `/wallet USER_ID|AMOUNT_INR` — admin credit to a user's wallet
@@ -33,7 +33,7 @@ Set these in Railway:
 - `/orders`
 - `/cancel`
 
-The shop flow includes category → product → duration plan → wallet or UPI / Paytm (INR) checkout via Cashfree. Cashfree payment links are displayed as a QR code and online-payment button, with a five-minute expiry. Verified payments fulfill keys automatically. Wallet purchases debit and fulfill within a database transaction.
+The shop flow includes category → product → duration plan → wallet or UPI / Paytm (INR) checkout via Cashfree. Cashfree payment links are displayed as a QR code and online-payment button. Verified payments fulfill keys automatically. Wallet purchases debit and fulfill within a database transaction. If a paid order cannot be fulfilled due to insufficient stock, the amount is returned to the wallet once.
 
 ## Important production hardening
 - Cashfree webhook signature verification is included. The webhook queries Cashfree Payment Links API status and amount before fulfillment. Test event payloads with your Cashfree sandbox dashboard before live use.
@@ -49,7 +49,7 @@ The shop flow includes category → product → duration plan → wallet or UPI 
 - This package installs SQLAlchemy with its asyncio extra (`SQLAlchemy[asyncio]`), which includes `greenlet`. Redeploy after updating the requirements.
 
 ## Telegram admin control panel
-Open `/admin` as an account listed in `ADMIN_IDS` to use the inline admin menu. The panel provides dashboard totals, user search/profile, ban/unban, wallet adjustment/history, product maintenance, stock status, order/payment review, reseller controls, broadcasts, coupon creation, settings storage, and admin audit logs. The Key Stock section includes a guided category → product → plan → bulk-key workflow; categories, products and plans can all be created from inline-button prompts without typing commands.
+Open `/admin` as an account listed in `ADMIN_IDS` to use the inline admin menu. The panel provides dashboard totals, user search/profile, ban/unban, wallet adjustment, product/category/plan management, key stock, payment/order review, reseller toggling, broadcasts, coupon creation, settings storage, referral reward stock and admin audit logs. Management actions are started from inline buttons; text is requested only for values such as names, prices, IDs and key batches. Categories can be renamed or removed (their products are moved to Other Products); products and plans can be edited or deactivated without deleting order history. All customer-facing prices and plan creation inputs use INR only.
 
 ### Additional admin commands
 - `/walletadjust USER_ID|AMOUNT` — credit with a positive amount or deduct with a negative amount; refuses a negative resulting balance.
@@ -72,7 +72,7 @@ New tables for wallet transactions, coupons, bot settings, refund records and ad
 - `/start` is listed as **Open Shop Menu** and returns verified users to the full store welcome screen.
 - Dashboard/back navigation returns to the store welcome screen.
 - Profile and order history show wallet, purchase statistics, delivered keys, dates, and order status.
-- Bulk checkout supports quantities 1, 5, 10, 15, and a custom quantity, limited by available stock.
+- Bulk checkout supports quantities 1, 5, 10, 15, and a custom quantity (maximum 100 per order). Stock availability is hidden from customers and checked atomically after payment; if stock is insufficient, the paid amount is credited to the customer wallet exactly once.
 - Wallet top-ups support ₹10, ₹20, ₹50, ₹100, or a custom amount (minimum ₹10) through Cashfree UPI QR. Successful top-ups are credited once via webhook or manual status check.
 - Support screen points to @subro98.
 
@@ -87,3 +87,28 @@ The database startup migration makes `orders.product_id` nullable so wallet top-
 - Admins add referral trial keys through **🎁 Reward Key Stock** in the admin menu. Root and Non-Root reward inventories are separate from normal shop inventory. If the selected type has no available reward key, the reward stays pending until stock is added.
 - Existing users are not retroactively assigned a referrer. Referral counts and claimed trial keys are stored in PostgreSQL.
 
+
+
+## Performance settings
+
+The bot uses SQLAlchemy async connection pooling with `pool_pre_ping`, a bounded pool, and connection recycling. With AWS RDS and Railway in Singapore, keep both endpoints in the same region and use a private/VPC connection when your AWS/Railway network setup supports it. A same-region placement reduces network distance but does not guarantee a fixed response time. Optional Railway variables:
+
+- `DB_POOL_SIZE=5` (default)
+- `DB_MAX_OVERFLOW=5` (default)
+- `DB_POOL_TIMEOUT=8` seconds (default)
+- `DB_POOL_RECYCLE=1800` seconds (default)
+
+Start with these defaults for one bot process. Increase pool size only after checking the AWS RDS connection limit and actual concurrent load. The catalogue queries are batched to avoid per-product/per-plan N+1 database round trips.
+
+
+## Latest performance and safety improvements
+
+- PostgreSQL pool size, overflow, timeout and recycle settings are configurable and bounded.
+- Added indexes for common stock, order-history, admin-log, wallet-history and referral lookups. Migrations are additive (`IF NOT EXISTS`) and do not delete customer/order data.
+- Customer product browsing avoids inventory count queries because stock is intentionally hidden. Product/plan catalogue loading avoids N+1 query patterns.
+- Telegram callback queries are acknowledged immediately; banned-user checks use a short-lived bounded cache to avoid repeated database round trips on rapid taps.
+- Cashfree HTTP keep-alive sessions are reused safely; payment-status GET requests have a single bounded retry for transient network/provider errors. Payment-creation POST requests are not blindly retried, avoiding accidental duplicate order creation.
+- Webhook request bodies are size-limited, payment fulfillment remains database-locked/idempotent, and database/HTTP pools are closed cleanly on shutdown.
+- Custom bulk quantities are validated (1–100), top-ups are validated (₹10–₹50,000), and product/category callback data is kept within Telegram's callback-data size limit.
+
+For production, monitor AWS RDS connection count, CPU, free memory and query latency before increasing `DB_POOL_SIZE`; each running bot process owns its own pool. Never share `DATABASE_URL`, Cashfree secrets or the Telegram bot token in chat or logs.
