@@ -38,7 +38,7 @@ engine = create_async_engine(
     pool_timeout=_pool_timeout,
     pool_recycle=_pool_recycle,
     pool_use_lifo=True,
-    connect_args={"ssl": "require", "server_settings": {"application_name": "panel-army-bot"}},
+    connect_args={"ssl": ("require" if os.getenv("DB_SSL", "require").lower() not in ("0", "false", "disable", "off") else False), "server_settings": {"application_name": "panel-army-bot"}},
 )
 Session = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -100,6 +100,7 @@ class WalletTransaction(Base):
     kind: Mapped[str] = mapped_column(String(16))
     note: Mapped[str] = mapped_column(String(255), default="")
     admin_id: Mapped[int | None] = mapped_column(BigInteger)
+    reference_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class AdminLog(Base):
@@ -179,6 +180,8 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(10)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_rewarded BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference_id VARCHAR(100)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_wallet_transactions_reference ON wallet_transactions (reference_id) WHERE reference_id IS NOT NULL",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Other Products'",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS maintenance BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE key_stock ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
@@ -195,6 +198,10 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_user_created ON wallet_transactions (user_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_admin_logs_created ON admin_logs (created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_referral_rewards_referrer_status ON referral_rewards (referrer_id, status)",
+            # Preserve duplicate historical rows but quarantine all except the oldest before
+            # enforcing global key uniqueness across every product/plan.
+            "WITH ranked AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY lower(btrim(key_text)) ORDER BY id) AS rn FROM key_stock) UPDATE key_stock SET status='DUPLICATE' WHERE id IN (SELECT id FROM ranked WHERE rn > 1)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_key_stock_global_key ON key_stock (lower(btrim(key_text)))",
         ]
         for statement in migrations:
             await conn.execute(text(statement))
@@ -350,9 +357,14 @@ async def get_plan(plan_id):
 
 async def create_order(user_id, plan_id, amount, quantity=1, payment_method="CASHFREE"):
     pl=await get_plan(plan_id)
-    if not pl or quantity < 1 or quantity > 100: raise ValueError("Invalid plan or quantity (maximum 100)")
+    user=await get_user(user_id)
+    if not pl or not user or quantity < 1 or quantity > 100: raise ValueError("Invalid plan, customer or quantity (maximum 100)")
+    if pl.get("maintenance"): raise ValueError(f"{pl['product_name']} is under maintenance")
+    expected_unit=pl['reseller_price_inr'] if user.get('is_reseller') else pl['price_inr']
+    expected=round(float(expected_unit)*int(quantity),2)
     amount = round(float(amount), 2)
-    if amount <= 0 or amount > 500000: raise ValueError("Invalid order amount")
+    if amount <= 0 or amount > 500000 or abs(amount-expected)>0.009:
+        raise ValueError("Order price validation failed. Please reopen the plan and try again.")
     order_id="PA-"+secrets.token_hex(8).upper()
     async with Session() as s:
         s.add(Order(order_id=order_id,user_id=user_id,product_id=pl["product_id"],plan_id=plan_id,duration=pl["duration"],quantity=quantity,amount_inr=amount,status="PENDING",payment_method=payment_method))
@@ -390,7 +402,7 @@ async def pay_wallet(user_id, plan_id, quantity=1):
             o=Order(order_id=order_id,user_id=user_id,product_id=pl["product_id"],plan_id=plan_id,duration=pl["duration"],quantity=quantity,amount_inr=amount,status="PENDING",payment_method="WALLET")
             s.add(o)
             u.wallet_balance=float(u.wallet_balance or 0)-amount
-            s.add(WalletTransaction(user_id=user_id,amount=amount,kind="DEBIT",note=f"Purchase {order_id}",admin_id=None))
+            s.add(WalletTransaction(user_id=user_id,amount=amount,kind="DEBIT",note=f"Purchase {order_id}",admin_id=None,reference_id=f"ORDER_DEBIT:{order_id}"))
             await s.flush()
             result=await _fulfill_locked(s,o)
             if not result or not result.get("key_text"):
@@ -440,9 +452,13 @@ async def credit_wallet_for_no_stock(order_id):
             if not user:
                 raise ValueError(f"Cannot refund order {order_id}: user does not exist")
             amount=round(float(order.amount_inr),2)
+            existing_tx=await s.scalar(select(WalletTransaction.id).where(WalletTransaction.reference_id==f"ORDER_REFUND:{order_id}"))
+            if existing_tx:
+                order.status="REFUNDED"
+                return {"credited":False,"user_id":order.user_id,"amount":amount}
             user.wallet_balance=round(float(user.wallet_balance or 0)+amount,2)
             s.add(WalletTransaction(user_id=order.user_id,amount=amount,kind="CREDIT",
-                                    note=f"Automatic no-stock refund {order_id}",admin_id=None))
+                                    note=f"Automatic no-stock refund {order_id}",admin_id=None,reference_id=f"ORDER_REFUND:{order_id}"))
             order.status="REFUNDED"
             return {"credited":True,"user_id":order.user_id,"amount":amount}
 
@@ -520,26 +536,55 @@ async def add_product(name, price, description, category="Other Products"):
         return result
 
 async def add_plan(product_id,duration,price_inr,price_usd,reseller_price_inr,reseller_price_usd):
+    result = await add_plans_bulk(product_id, [(duration, price_inr, price_usd, reseller_price_inr, reseller_price_usd)])
+    return result[0] if result else None
+
+async def add_plans_bulk(product_id, plans):
+    """Atomically create a batch; reject duplicate durations before any insert."""
+    cleaned=[]
+    seen=set()
+    for duration, customer_inr, customer_usd, reseller_inr, reseller_usd in plans:
+        duration=str(duration or '').strip()
+        values=[float(customer_inr),float(customer_usd),float(reseller_inr),float(reseller_usd)]
+        if not duration or len(duration)>80 or any(v<0 or v>500000 for v in values):
+            raise ValueError('Invalid plan duration or price')
+        norm=duration.casefold()
+        if norm in seen: raise ValueError(f'Duplicate duration in batch: {duration}')
+        seen.add(norm); cleaned.append((duration,*values))
+    if not cleaned: return []
     async with Session() as s:
-        p=await s.get(Product,product_id)
-        if not p:return None
-        prior=await s.scalar(select(func.count(ProductPlan.id)).where(ProductPlan.product_id==product_id))
-        pl=ProductPlan(product_id=product_id,duration=duration,price_inr=price_inr,price_usd=price_usd,reseller_price_inr=reseller_price_inr,reseller_price_usd=reseller_price_usd)
-        s.add(pl);await s.flush()
-        # Preserve stock entered against legacy products before plans existed.
-        if not prior:
-            await s.execute(text("UPDATE key_stock SET plan_id=:plan WHERE product_id=:product AND plan_id IS NULL"),{"plan":pl.id,"product":product_id})
-        await s.commit();await s.refresh(pl)
-        return {"id":pl.id,"duration":pl.duration}
+        async with s.begin():
+            # Serialize plan creation for this product across concurrent admin sessions.
+            await s.execute(text('SELECT pg_advisory_xact_lock(:lock_id)'), {'lock_id': int(product_id)})
+            product=await s.get(Product,product_id)
+            if not product: raise ValueError('Product not found')
+            existing=(await s.scalars(select(ProductPlan.duration).where(ProductPlan.product_id==product_id))).all()
+            existing_norm={str(x).strip().casefold() for x in existing}
+            conflicts=[d for d,*_ in cleaned if d.casefold() in existing_norm]
+            if conflicts: raise ValueError('Plan duration already exists: '+', '.join(conflicts))
+            had_plans=bool(existing)
+            created=[]
+            for duration,customer_inr,customer_usd,reseller_inr,reseller_usd in cleaned:
+                pl=ProductPlan(product_id=product_id,duration=duration,price_inr=customer_inr,price_usd=customer_usd,reseller_price_inr=reseller_inr,reseller_price_usd=reseller_usd)
+                s.add(pl); await s.flush()
+                if not had_plans and len(created)==0:
+                    await s.execute(text('UPDATE key_stock SET plan_id=:plan WHERE product_id=:product AND plan_id IS NULL'), {'plan':pl.id,'product':product_id})
+                created.append({'id':pl.id,'duration':pl.duration})
+            return created
 
 async def add_stock(plan_id, keys):
+    """Globally deduplicate keys (case/outer-whitespace insensitive), including concurrent imports."""
+    normalized=list(dict.fromkeys(str(k).strip() for k in keys if str(k).strip()))
+    if not normalized: return 0
     async with Session() as s:
-        pl=await s.get(ProductPlan,plan_id)
-        if not pl:return 0
-        existing=set((await s.scalars(select(KeyStock.key_text).where(KeyStock.plan_id==plan_id))).all())
-        new_keys=[k for k in dict.fromkeys(keys) if k not in existing]
-        s.add_all([KeyStock(product_id=pl.product_id,plan_id=plan_id,key_text=k,status="AVAILABLE") for k in new_keys])
-        await s.commit();return len(new_keys)
+        async with s.begin():
+            pl=await s.get(ProductPlan,plan_id)
+            if not pl:return 0
+            added=0
+            for key in normalized:
+                result=await s.execute(text("INSERT INTO key_stock (product_id, plan_id, key_text, status, created_at) VALUES (:pid,:plan,:key,'AVAILABLE',NOW()) ON CONFLICT DO NOTHING"), {'pid':pl.product_id,'plan':plan_id,'key':key})
+                added += max(0, result.rowcount or 0)
+            return added
 
 async def list_orders(user_id):
     async with Session() as s:
@@ -566,9 +611,13 @@ async def fulfill_wallet_topup(order_id):
             if o.status not in ("PENDING","EXPIRED"): return None
             u=await s.scalar(select(User).where(User.user_id==o.user_id).with_for_update())
             if not u:return None
+            existing_tx=await s.scalar(select(WalletTransaction.id).where(WalletTransaction.reference_id==f"TOPUP:{order_id}"))
+            if existing_tx:
+                o.status="PAID"
+                return {"credited":False,"user_id":o.user_id,"amount":float(o.amount_inr)}
             u.wallet_balance=float(u.wallet_balance or 0)+float(o.amount_inr)
             o.status="PAID";o.paid_at=datetime.now(timezone.utc)
-            s.add(WalletTransaction(user_id=o.user_id,amount=o.amount_inr,kind="CREDIT",note=f"Cashfree wallet top-up {order_id}",admin_id=None))
+            s.add(WalletTransaction(user_id=o.user_id,amount=o.amount_inr,kind="CREDIT",note=f"Cashfree wallet top-up {order_id}",admin_id=None,reference_id=f"TOPUP:{order_id}"))
             return {"credited":True,"user_id":o.user_id,"amount":float(o.amount_inr)}
 
 async def user_order_stats(user_id):
@@ -602,9 +651,13 @@ async def dashboard_stats():
         paid=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID", Order.payment_method!="TOPUP")) or 0)
         revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method!="TOPUP")) or 0)
         stock=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.status=="AVAILABLE")) or 0)
+        sold_stock=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.status=="SOLD")) or 0)
+        resellers=int(await s.scalar(select(func.count(User.user_id)).where(User.is_reseller==True)) or 0)
+        pending=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status.in_(["PENDING","EXPIRED","PAID_NO_STOCK"]))) or 0)
         india_tz=timezone(timedelta(hours=5, minutes=30)); now=datetime.now(india_tz); today_start=now.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc)
         today_revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method!="TOPUP", Order.paid_at >= today_start)) or 0)
-        return {"users":users,"orders":orders,"paid":paid,"revenue":revenue,"today_revenue":today_revenue,"stock":stock}
+        today_orders=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID",Order.payment_method!="TOPUP",Order.paid_at>=today_start)) or 0)
+        return {"users":users,"resellers":resellers,"orders":orders,"paid":paid,"pending":pending,"revenue":revenue,"today_revenue":today_revenue,"today_orders":today_orders,"stock":stock,"sold_stock":sold_stock}
 
 async def search_users(term, limit=15):
     async with Session() as s:
@@ -718,11 +771,15 @@ async def broadcast_user_ids(resellers=False):
 async def set_key_status(key_id, status):
     if status not in {"AVAILABLE","SOLD","EXPIRED"}:return False
     async with Session() as s:
-        key=await s.get(KeyStock,key_id)
-        if not key:return False
-        key.status=status
-        if status=="AVAILABLE":key.order_id=None
-        await s.commit();return True
+        async with s.begin():
+            key=await s.scalar(select(KeyStock).where(KeyStock.id==key_id).with_for_update())
+            if not key:return False
+            if status=="AVAILABLE":
+                duplicate=await s.scalar(select(KeyStock.id).where(KeyStock.id!=key_id,func.lower(func.trim(KeyStock.key_text))==key.key_text.strip().lower()).limit(1))
+                if duplicate:return False
+                key.order_id=None
+            key.status=status
+            return True
 
 
 async def record_refund(order_id, status, note, admin_id):
@@ -841,3 +898,45 @@ async def delete_product_admin(product_id):
             await s.commit();return "ARCHIVED"
         await s.execute(text("DELETE FROM product_plans WHERE product_id=:pid"),{"pid":product_id})
         await s.delete(p);await s.commit();return "DELETED"
+
+
+async def search_catalog(term, limit=30):
+    term=(term or '').strip()
+    async with Session() as s:
+        stmt=select(Product).where(Product.active==True).order_by(Product.category,Product.name).limit(max(1,min(int(limit),100)))
+        if term:
+            like=f"%{term}%"
+            stmt=stmt.where(or_(Product.name.ilike(like),Product.category.ilike(like),Product.description.ilike(like)))
+        rows=(await s.scalars(stmt)).all()
+        return [{'id':p.id,'name':p.name,'category':p.category,'maintenance':bool(p.maintenance)} for p in rows]
+
+async def stock_export(plan_id, status='AVAILABLE', limit=5000):
+    async with Session() as s:
+        stmt=select(KeyStock).where(KeyStock.plan_id==plan_id).order_by(KeyStock.id).limit(max(1,min(int(limit),10000)))
+        if status and status!='ALL': stmt=stmt.where(KeyStock.status==status.upper())
+        rows=(await s.scalars(stmt)).all()
+        return [{'id':k.id,'key_text':k.key_text,'status':k.status,'order_id':k.order_id,'created_at':k.created_at} for k in rows]
+
+async def stock_order_history(key_id):
+    async with Session() as s:
+        row=await s.get(KeyStock,key_id)
+        if not row:return None
+        order=await s.get(Order,row.order_id) if row.order_id else None
+        return {'id':row.id,'status':row.status,'order_id':row.order_id,'key_text':row.key_text,'user_id':order.user_id if order else None,'amount_inr':float(order.amount_inr) if order else None,'created_at':order.created_at if order else None}
+
+async def payment_reconciliation(limit=100):
+    async with Session() as s:
+        rows=(await s.scalars(select(Order).where(Order.status.in_(['PENDING','EXPIRED','PAID_NO_STOCK'])).order_by(Order.created_at).limit(max(1,min(int(limit),500)) ))).all()
+        return [{'order_id':o.order_id,'user_id':o.user_id,'amount_inr':float(o.amount_inr),'status':o.status,'payment_method':o.payment_method,'created_at':o.created_at} for o in rows]
+
+async def reseller_performance(user_id):
+    async with Session() as s:
+        count=int(await s.scalar(select(func.count(Order.order_id)).where(Order.user_id==user_id,Order.status=='PAID',Order.payment_method!='TOPUP')) or 0)
+        sales=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.user_id==user_id,Order.status=='PAID',Order.payment_method!='TOPUP')) or 0)
+        return {'orders':count,'sales_inr':sales}
+
+
+async def health_check():
+    async with engine.connect() as conn:
+        await conn.execute(text('SELECT 1'))
+    return True

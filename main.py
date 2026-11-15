@@ -18,7 +18,7 @@ from db import (init_db, close_db, is_user_banned, get_or_create_user, list_cate
                 admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
                 set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
                 set_bot_setting, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats, list_resellers, list_coupons, update_coupon, delete_coupon, set_product_maintenance, delete_category_admin, delete_product_admin,
-                attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, rename_category_admin, category_products_admin, create_category_admin)
+                attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, health_check, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, rename_category_admin, category_products_admin, create_category_admin, add_plans_bulk, payment_reconciliation, search_catalog)
 from cashfree import create_upi_qr_order, fetch_order_payments, verify_webhook_signature, close_cashfree_session
 
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +36,7 @@ class ContactState(StatesGroup):
 
 class AdminState(StatesGroup):
     search_user=State()
+    search_catalog=State()
     broadcast=State()
     stock_category_name=State()
     stock_product_name=State()
@@ -43,6 +44,7 @@ class AdminState(StatesGroup):
     stock_plan_duration=State()
     stock_plan_prices=State()
     bulk_plan_input=State()
+    bulk_plan_confirm=State()
     stock_keys=State()
     reward_keys=State()
     admin_input=State()
@@ -570,7 +572,7 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
     section=call.data.split(":",1)[1]
     if section=="dashboard":
         d=await dashboard_stats()
-        msg=("📊 <b>Dashboard</b>\n\n" f"👥 Users: {d['users']}\n📦 Orders: {d['orders']}\n✅ Paid orders: {d['paid']}\n💰 Revenue: ₹{d['revenue']:.2f}\n📅 Today's revenue: ₹{d['today_revenue']:.2f}\n🔑 Available keys: {d['stock']}")
+        msg=("📊 <b>Dashboard</b>\n\n" f"👥 Customers & users: {d['users']}\n👑 Resellers: {d['resellers']}\n📦 Orders: {d['orders']}\n✅ Paid orders: {d['paid']}\n⏳ Pending / review: {d['pending']}\n💰 Lifetime revenue: ₹{d['revenue']:.2f}\n📅 Today: ₹{d['today_revenue']:.2f} ({d['today_orders']} sales)\n🔑 Available keys: {d['stock']}\n📤 Sold keys: {d['sold_stock']}")
     elif section=="users":
         await state.set_state(AdminState.search_user)
         msg="👥 <b>User management</b>\nSend a Telegram ID, username, or name to search. Use /cancel to stop."
@@ -580,7 +582,7 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
     elif section=="products":
         cats=[c["name"] for c in await list_categories()]
         rows=[[InlineKeyboardButton(text=f"📁 {name}",callback_data=f"ac:category:{i}", style="primary")] for i,name in enumerate(cats)]
-        rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory", style="primary")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories", style="primary")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
+        rows += [[InlineKeyboardButton(text="🔎 Search categories / products",callback_data="ac:search",style="success")],[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory", style="primary")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories", style="primary")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text("📦 <b>PRODUCT MANAGEMENT</b>\n\nChoose a category to view its products, or add/manage categories.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call);return
     elif section=="stock":
         rows=await admin_stock_summary()
@@ -593,9 +595,10 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, );return
     elif section=="payments":
         rows=await admin_orders(20)
+        recon=await payment_reconciliation(100)
         msg="💳 <b>PAYMENTS & ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nSelect an order to inspect its payment details.\n\n"+("\n".join(f"• <b>{o['order_id']}</b> · {o['status']} · ₹{o['amount_inr']:.2f}" for o in rows) if rows else "No payment/order records found.")
         pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}", style="primary")] for o in rows]
-        pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
+        pay_rows += [[InlineKeyboardButton(text=f"🧭 Reconciliation ({len(recon)} pending/review)",callback_data="admpay:reconcile",style="success")],[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows));await callback_answer(call, );return
     elif section=="resellers":
         rows=await list_resellers(50)
@@ -620,6 +623,14 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
     else:msg="Unknown section."
     await call.message.edit_text(msg,reply_markup=admin_keyboard());await callback_answer(call, )
 
+
+@dp.callback_query(F.data=="admpay:reconcile")
+async def admin_payment_reconcile(call:CallbackQuery):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin access required",show_alert=True);return
+    rows=await payment_reconciliation(100)
+    body="\n".join(f"• {r['order_id']} · {r['status']} · ₹{r['amount_inr']:.2f} · {r['created_at'].strftime('%d %b %H:%M')}" for r in rows)
+    await call.message.edit_text("🧭 <b>PAYMENT RECONCILIATION</b>\n\nThese orders require provider-status review; this screen does not mark payments as successful.\n\n"+(body or "No pending/review orders."),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh",callback_data="admpay:reconcile",style="success")],[InlineKeyboardButton(text="🔙 Payments",callback_data="adm:payments",style="primary")]]))
+    await callback_answer(call)
 
 @dp.callback_query(F.data=="admpay:list")
 async def admin_payments_list(call:CallbackQuery):
@@ -699,7 +710,7 @@ async def ac_categories(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
     cats=[c["name"] for c in await list_categories()]
     rows=[[InlineKeyboardButton(text=f"⚙️ {name}",callback_data=f"ac:categorymanage:{i}", style="primary")] for i,name in enumerate(cats)]
-    rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory", style="primary")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products", style="primary")]]
+    rows += [[InlineKeyboardButton(text="🔎 Search categories / products",callback_data="ac:search",style="success")],[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory", style="primary")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products", style="primary")]]
     await call.message.edit_text("⚙️ <b>MANAGE CATEGORIES</b>\nChoose a category to rename or delete.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call)
 
 async def show_admin_category_products(target, category):
@@ -1229,49 +1240,75 @@ async def stock_new_plan(call:CallbackQuery,state:FSMContext):
     await state.set_state(AdminState.stock_plan_duration)
     await call.message.answer("🗓️ <b>New plan</b>\nSend the plan name/duration (example: 1 Month, 3 Months, Lifetime). Send /cancel to stop.");await callback_answer(call, )
 
+@dp.callback_query(F.data=="ac:search")
+async def ac_search_start(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
+    await state.set_state(AdminState.search_catalog)
+    await call.message.answer("🔎 Send a category or product name to search:")
+    await callback_answer(call)
+
+@dp.message(AdminState.search_catalog,F.text)
+async def ac_search_results(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    term=message.text.strip()
+    cats=[c['name'] for c in await list_categories() if term.casefold() in c['name'].casefold()]
+    products=await search_catalog(term,30)
+    all_cats=[c['name'] for c in await list_categories()]
+    rows=[]
+    for name in cats[:10]:
+        idx=all_cats.index(name)
+        rows.append([InlineKeyboardButton(text=f"📁 {name}",callback_data=f"ac:category:{idx}",style="primary")])
+    for product in products[:20]:
+        rows.append([InlineKeyboardButton(text=f"📦 {product['name']} · {product['category']}",callback_data=f"ac:product:{product['id']}",style="primary")])
+    rows.append([InlineKeyboardButton(text="🔙 Product management",callback_data="adm:products",style="primary")])
+    await state.clear()
+    await message.answer((f"🔎 <b>Search results for:</b> {html.escape(term)}\n\n" if rows else f"No category or product matches: {html.escape(term)}"),reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+
 @dp.message(AdminState.bulk_plan_input,F.text)
 async def bulk_plan_input(message:Message,state:FSMContext):
     if not is_admin(message.from_user.id):return
     data=await state.get_data();product_id=data.get("stock_product_id")
-    parsed=[];errors=[]
+    parsed=[];errors=[];seen=set()
     for line_no,line in enumerate(message.text.splitlines(),1):
         line=line.strip()
         if not line:continue
         try:
-            if "-" not in line or "|" not in line:
-                raise ValueError
+            if "-" not in line or "|" not in line: raise ValueError
             duration,prices=line.rsplit("-",1)
             customer_s,reseller_s=prices.split("|",1)
-            duration=duration.strip()
-            customer=float(customer_s.strip().replace("₹",""))
-            reseller=float(reseller_s.strip().replace("₹",""))
-            if not duration or len(duration)>80 or customer<0 or reseller<0:
-                raise ValueError
-            parsed.append((duration,customer,reseller))
-        except (ValueError,TypeError):
-            errors.append(line_no)
+            duration=duration.strip(); customer=float(customer_s.strip().replace("₹","")); reseller=float(reseller_s.strip().replace("₹",""))
+            if not duration or len(duration)>80 or customer<0 or reseller<0 or customer>500000 or reseller>500000: raise ValueError
+            if duration.casefold() in seen: raise ValueError
+            seen.add(duration.casefold());parsed.append((duration,customer,0.0,reseller,0.0))
+        except (ValueError,TypeError): errors.append(line_no)
     if not parsed or errors:
-        detail=("Invalid line(s): "+", ".join(map(str,errors))+".\n") if errors else "No valid plan lines found.\n"
-        await message.answer(detail+"Use: <code>3 Hours - 27 | 9</code> (one plan per line). No plans were added.")
+        detail=("Invalid or duplicate line(s): "+", ".join(map(str,errors))+".\n") if errors else "No valid plan lines found.\n"
+        await message.answer(detail+"Use: <code>3 Hours - 27 | 9</code> (one plan per line). Nothing was saved.")
         return
-    created=[]
+    await state.update_data(bulk_plans=parsed);await state.set_state(AdminState.bulk_plan_confirm)
+    preview="\n".join(f"• {html.escape(d)} — Customer ₹{c:.2f} | Reseller ₹{r:.2f}" for d,c,_,r,_ in parsed)
+    await message.answer(f"🧾 <b>Review bulk plans ({len(parsed)})</b>\n\n{preview}\n\nNo changes have been saved yet. Confirm to save all plans in one transaction.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Confirm & Save All",callback_data="ac:bulkplans:confirm",style="success")],[InlineKeyboardButton(text="❌ Cancel",callback_data="ac:bulkplans:cancel",style="danger")]]))
+
+@dp.callback_query(F.data.startswith("ac:bulkplans:"))
+async def bulk_plan_confirm(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id):await callback_answer(call,"Admin access required",show_alert=True);return
+    action=call.data.rsplit(":",1)[-1]
+    data=await state.get_data();plans=data.get("bulk_plans") or [];product_id=data.get("stock_product_id")
+    if action=="cancel":
+        await state.clear();await call.message.edit_text("Bulk plan creation cancelled. No plans were saved.");await callback_answer(call);return
+    if not plans or not product_id:
+        await state.clear();await call.message.edit_text("Preview expired. Please start bulk plan creation again.");await callback_answer(call);return
     try:
-        for duration,customer,reseller in parsed:
-            pl=await add_plan(product_id,duration,customer,0.0,reseller,0.0)
-            if not pl:raise RuntimeError("Product not found")
-            created.append(pl)
-            await admin_log(message.from_user.id,"PLAN_CREATE",f"{pl['id']} {pl['duration']} product={product_id}")
+        created=await add_plans_bulk(product_id,plans)
+        for pl in created: await admin_log(call.from_user.id,"PLAN_CREATE",f"{pl['id']} {pl['duration']} product={product_id} bulk")
         await state.clear()
         summary="\n".join(f"• {html.escape(pl['duration'])}" for pl in created)
-        await message.answer(
-            f"✅ <b>{len(created)} plan(s) created successfully!</b>\n\n{summary}\n\n"
-            "Now open each plan to upload its keys.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Product",callback_data=f"ac:product:{product_id}", style="primary")]])
-        )
-    except Exception:
-        log.exception("Bulk plan creation failed")
-        await message.answer(f"⚠️ Created {len(created)} plan(s) before an error. Please check the product plan list before retrying.")
+        await call.message.edit_text(f"✅ <b>{len(created)} plan(s) saved successfully!</b>\n\n{summary}\n\nAll plans were committed together. Upload stock for each plan next.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Product",callback_data=f"ac:product:{product_id}",style="primary")]]))
+    except Exception as exc:
+        log.exception("Atomic bulk plan creation failed")
+        await call.message.edit_text(f"⚠️ No plans were saved. {html.escape(str(exc)[:250])}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Product",callback_data=f"ac:product:{product_id}",style="primary")]]))
         await state.clear()
+    await callback_answer(call)
 
 
 @dp.message(AdminState.stock_plan_duration,F.text)
@@ -1520,6 +1557,13 @@ async def broadcast_resellers_start(message:Message,state:FSMContext):
 async def run_webhook_server():
     from aiohttp import web
     import json
+    async def health(request):
+        try:
+            await health_check()
+            return web.json_response({"status":"ok","database":"ok"})
+        except Exception:
+            log.exception("Health check failed")
+            return web.json_response({"status":"degraded","database":"unavailable"},status=503)
     async def webhook(request):
         raw=await request.read();timestamp=request.headers.get("x-webhook-timestamp","");signature=request.headers.get("x-webhook-signature","")
         if not verify_webhook_signature(timestamp,raw,signature):return web.Response(status=401,text="Invalid signature")
@@ -1552,7 +1596,7 @@ async def run_webhook_server():
                         await expire_order(order_id)
         except Exception:log.exception("Webhook processing failed");return web.Response(status=500,text="Webhook processing error")
         return web.Response(text="OK")
-    app=web.Application(client_max_size=1024 * 1024);app.router.add_post("/cashfree/webhook",webhook)
+    app=web.Application(client_max_size=1024 * 1024);app.router.add_get("/health",health);app.router.add_post("/cashfree/webhook",webhook)
     runner=web.AppRunner(app);await runner.setup();port=int(os.getenv("PORT","8080"));site=web.TCPSite(runner,"0.0.0.0",port);await site.start();log.info("Webhook listening on port %s",port);return runner
 
 async def main():
