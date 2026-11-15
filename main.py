@@ -1340,6 +1340,9 @@ async def stock_receive_keys(message:Message,state:FSMContext):
     if not is_admin(message.from_user.id):return
     keys=[line.strip() for line in message.text.splitlines() if line.strip()]
     if not keys:await message.answer("No keys found. Paste one key per line.");return
+    if any(k.casefold() in {"/cancel", "cancel"} for k in keys):
+        await message.answer("⚠️ I detected /cancel or cancel in the stock text. Nothing was saved. Send only real keys, one per line, or use the Cancel button to stop.")
+        return
     data=await state.get_data();plan_id=data.get('stock_plan_id')
     added=await add_stock(plan_id,keys)
     await admin_log(message.from_user.id,"REWARD_KEY_UPLOAD" if data.get("reward_stock_type") else "KEY_BULK_UPLOAD",f"plan={plan_id}, type={data.get('reward_stock_type','SHOP')}, added={added}, submitted={len(keys)}")

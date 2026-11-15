@@ -198,10 +198,13 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_user_created ON wallet_transactions (user_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_admin_logs_created ON admin_logs (created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_referral_rewards_referrer_status ON referral_rewards (referrer_id, status)",
-            # Preserve duplicate historical rows but quarantine all except the oldest before
-            # enforcing global key uniqueness across every product/plan.
-            "WITH ranked AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY lower(btrim(key_text)) ORDER BY id) AS rn FROM key_stock) UPDATE key_stock SET status='DUPLICATE' WHERE id IN (SELECT id FROM ranked WHERE rn > 1)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_key_stock_global_key ON key_stock (lower(btrim(key_text)))",
+            # Quarantine accidental command tokens and historical duplicate rows. The
+            # partial unique index intentionally excludes quarantined rows, otherwise
+            # duplicate legacy rows would still prevent index creation.
+            "UPDATE key_stock SET status='DUPLICATE' WHERE lower(btrim(key_text)) IN ('/cancel','cancel') OR btrim(key_text) = ''",
+            "WITH ranked AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY lower(btrim(key_text)) ORDER BY id) AS rn FROM key_stock WHERE status <> 'DUPLICATE') UPDATE key_stock SET status='DUPLICATE' WHERE id IN (SELECT id FROM ranked WHERE rn > 1)",
+            "DROP INDEX IF EXISTS ux_key_stock_global_key",
+            "CREATE UNIQUE INDEX ux_key_stock_global_key ON key_stock (lower(btrim(key_text))) WHERE status <> 'DUPLICATE'",
         ]
         for statement in migrations:
             await conn.execute(text(statement))
@@ -575,6 +578,8 @@ async def add_plans_bulk(product_id, plans):
 async def add_stock(plan_id, keys):
     """Globally deduplicate keys (case/outer-whitespace insensitive), including concurrent imports."""
     normalized=list(dict.fromkeys(str(k).strip() for k in keys if str(k).strip()))
+    if any(k.casefold() in {"/cancel", "cancel"} for k in normalized):
+        raise ValueError("Cancellation commands cannot be stored as stock keys. Upload only actual keys, one per line.")
     if not normalized: return 0
     async with Session() as s:
         async with s.begin():
@@ -775,7 +780,7 @@ async def set_key_status(key_id, status):
             key=await s.scalar(select(KeyStock).where(KeyStock.id==key_id).with_for_update())
             if not key:return False
             if status=="AVAILABLE":
-                duplicate=await s.scalar(select(KeyStock.id).where(KeyStock.id!=key_id,func.lower(func.trim(KeyStock.key_text))==key.key_text.strip().lower()).limit(1))
+                duplicate=await s.scalar(select(KeyStock.id).where(KeyStock.id!=key_id,KeyStock.status!="DUPLICATE",func.lower(func.trim(KeyStock.key_text))==key.key_text.strip().lower()).limit(1))
                 if duplicate:return False
                 key.order_id=None
             key.status=status
