@@ -53,13 +53,13 @@ def is_admin(user_id:int)->bool:return user_id in ADMIN_IDS
 
 def admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Dashboard",callback_data="adm:dashboard"),InlineKeyboardButton(text="👥 Users",callback_data="adm:users")],
-        [InlineKeyboardButton(text="💰 Wallet",callback_data="adm:wallet"),InlineKeyboardButton(text="📦 Products",callback_data="adm:products")],
-        [InlineKeyboardButton(text="🔑 Key Stock",callback_data="adm:stock"),InlineKeyboardButton(text="🎁 Reward Key Stock",callback_data="rewardstock:menu")],
-        [InlineKeyboardButton(text="💳 Payments",callback_data="adm:payments")],
-        [InlineKeyboardButton(text="👑 Resellers",callback_data="adm:resellers"),InlineKeyboardButton(text="📢 Broadcast",callback_data="adm:broadcast")],
-        [InlineKeyboardButton(text="🎟️ Coupons",callback_data="adm:coupons"),InlineKeyboardButton(text="⚙️ Settings",callback_data="adm:settings")],
-        [InlineKeyboardButton(text="📜 Admin Logs",callback_data="adm:logs")],
+        [InlineKeyboardButton(text="📊 Dashboard",callback_data="adm:dashboard", style="primary"),InlineKeyboardButton(text="👥 Users",callback_data="adm:users", style="primary")],
+        [InlineKeyboardButton(text="💰 Wallet",callback_data="adm:wallet", style="primary"),InlineKeyboardButton(text="📦 Products",callback_data="adm:products", style="primary")],
+        [InlineKeyboardButton(text="🔑 Key Stock",callback_data="adm:stock", style="primary"),InlineKeyboardButton(text="🎁 Reward Key Stock",callback_data="rewardstock:menu", style="primary")],
+        [InlineKeyboardButton(text="💳 Payments",callback_data="adm:payments", style="success")],
+        [InlineKeyboardButton(text="👑 Resellers",callback_data="adm:resellers", style="primary"),InlineKeyboardButton(text="📢 Broadcast",callback_data="adm:broadcast", style="primary")],
+        [InlineKeyboardButton(text="🎟️ Coupons",callback_data="adm:coupons", style="primary"),InlineKeyboardButton(text="⚙️ Settings",callback_data="adm:settings", style="primary")],
+        [InlineKeyboardButton(text="📜 Admin Logs",callback_data="adm:logs", style="primary")],
     ])
 
 def admin_nav_rows():
@@ -68,12 +68,12 @@ def admin_nav_rows():
 
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛍️ Shop Now",callback_data="shop")],
-        [InlineKeyboardButton(text="📦 My Orders",callback_data="orders"),InlineKeyboardButton(text="👤 Profile",callback_data="profile")],
-        [InlineKeyboardButton(text="💰 Add Balance",callback_data="balance"),InlineKeyboardButton(text="🎁 Referral",callback_data="referral")],
-        [InlineKeyboardButton(text="🎰 Lucky Spin",callback_data="spin"),InlineKeyboardButton(text="⚡ Reseller Dashboard",callback_data="reseller")],
-        [InlineKeyboardButton(text="📥 Download Files",callback_data="downloads"),InlineKeyboardButton(text="📺 How to Use",callback_data="howto")],
-        [InlineKeyboardButton(text="🎧 Support",callback_data="support")],
+        [InlineKeyboardButton(text="🛍️ Shop Now",callback_data="shop", style="primary")],
+        [InlineKeyboardButton(text="📦 My Orders",callback_data="orders", style="primary"),InlineKeyboardButton(text="👤 Profile",callback_data="profile", style="primary")],
+        [InlineKeyboardButton(text="💰 Add Balance",callback_data="balance", style="primary"),InlineKeyboardButton(text="🎁 Referral",callback_data="referral", style="primary")],
+        [InlineKeyboardButton(text="🎰 Lucky Spin",callback_data="spin", style="primary"),InlineKeyboardButton(text="⚡ Reseller Dashboard",callback_data="reseller", style="primary")],
+        [InlineKeyboardButton(text="📥 Download Files",callback_data="downloads", style="primary"),InlineKeyboardButton(text="📺 How to Use",callback_data="howto", style="primary")],
+        [InlineKeyboardButton(text="🎧 Support",callback_data="support", style="primary")],
     ])
 
 def store_welcome(name="Customer"):
@@ -82,35 +82,35 @@ def store_welcome(name="Customer"):
             "⭐ ━ STORE HIGHLIGHTS ━ ⭐\n\n│ 🔑 Premium Game Keys\n│ ⚡ Instant Delivery 24/7\n│ 🔒 100% Secure Payment\n│ 💰 Best Prices Guaranteed\n│ 🎁 Referral Rewards\n│ 📞 Professional Support\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🚀 Tap Shop Now to Start!")
 
 def home_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛍️ Open Shop Menu",callback_data="home")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛍️ Open Shop Menu",callback_data="home", style="primary")]])
 
 def quantity_keyboard(plan_id, product_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1",callback_data=f"qty:{plan_id}:1"),InlineKeyboardButton(text="5",callback_data=f"qty:{plan_id}:5"),InlineKeyboardButton(text="10",callback_data=f"qty:{plan_id}:10"),InlineKeyboardButton(text="15",callback_data=f"qty:{plan_id}:15")],
-        [InlineKeyboardButton(text="✍️ Custom Quantity",callback_data=f"qtycustom:{plan_id}")],
-        [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{product_id}")]])
+        [InlineKeyboardButton(text="1",callback_data=f"qty:{plan_id}:1", style="primary"),InlineKeyboardButton(text="5",callback_data=f"qty:{plan_id}:5", style="primary"),InlineKeyboardButton(text="10",callback_data=f"qty:{plan_id}:10", style="primary"),InlineKeyboardButton(text="15",callback_data=f"qty:{plan_id}:15", style="primary")],
+        [InlineKeyboardButton(text="✍️ Custom Quantity",callback_data=f"qtycustom:{plan_id}", style="primary")],
+        [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{product_id}", style="primary")]])
 
 def quantity_payment_keyboard(plan_id, quantity, amount, balance, product_id=None):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✅ Pay with Wallet (₹{amount:.2f}) · Balance ₹{balance:.2f}",callback_data=f"wallet:{plan_id}:{quantity}")],
-        [InlineKeyboardButton(text="💳 Pay with Paytm/UPI (INR)",callback_data=f"upi:{plan_id}:{quantity}")],
-        [InlineKeyboardButton(text="📦 Bulk Purchase",callback_data=f"bulk:{plan_id}")],
-        [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{product_id or plan_id}")]])
+        [InlineKeyboardButton(text=f"✅ Pay with Wallet (₹{amount:.2f}) · Balance ₹{balance:.2f}",callback_data=f"wallet:{plan_id}:{quantity}", style="primary")],
+        [InlineKeyboardButton(text="💳 Pay with Paytm/UPI (INR)",callback_data=f"upi:{plan_id}:{quantity}", style="success")],
+        [InlineKeyboardButton(text="📦 Bulk Purchase",callback_data=f"bulk:{plan_id}", style="success")],
+        [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{product_id or plan_id}", style="primary")]])
 
 def topup_amount_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="₹10",callback_data="topup:10"),InlineKeyboardButton(text="₹20",callback_data="topup:20"),InlineKeyboardButton(text="₹50",callback_data="topup:50")],
-        [InlineKeyboardButton(text="₹100",callback_data="topup:100"),InlineKeyboardButton(text="✍️ Custom Amount",callback_data="topup:custom")],
-        [InlineKeyboardButton(text="🔙 Dashboard",callback_data="home")]])
+        [InlineKeyboardButton(text="₹10",callback_data="topup:10", style="primary"),InlineKeyboardButton(text="₹20",callback_data="topup:20", style="primary"),InlineKeyboardButton(text="₹50",callback_data="topup:50", style="primary")],
+        [InlineKeyboardButton(text="₹100",callback_data="topup:100", style="primary"),InlineKeyboardButton(text="✍️ Custom Amount",callback_data="topup:custom", style="primary")],
+        [InlineKeyboardButton(text="🔙 Dashboard",callback_data="home", style="primary")]])
 
 def category_keyboard(categories):
-    rows=[[InlineKeyboardButton(text=cat['name'],callback_data="category:"+hashlib.sha256(cat['name'].encode("utf-8")).hexdigest()[:16])] for cat in categories]
-    rows.append([InlineKeyboardButton(text="🔙 Back to Menu",callback_data="home")])
+    rows=[[InlineKeyboardButton(text=cat['name'],callback_data="category:"+hashlib.sha256(cat['name'].encode("utf-8")).hexdigest()[:16], style="primary")] for cat in categories]
+    rows.append([InlineKeyboardButton(text="🔙 Back to Menu",callback_data="home", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def product_keyboard(products):
-    rows=[[InlineKeyboardButton(text=p['name'],callback_data=f"product:{p['id']}")] for p in products]
-    rows.append([InlineKeyboardButton(text="🔙 All Categories",callback_data="shop")])
+    rows=[[InlineKeyboardButton(text=p['name'],callback_data=f"product:{p['id']}", style="primary")] for p in products]
+    rows.append([InlineKeyboardButton(text="🔙 All Categories",callback_data="shop", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def price_details(p,user):
@@ -132,8 +132,8 @@ def plan_keyboard(product,user=None):
         shown_inr=plan['reseller_price_inr'] if reseller else plan['price_inr']
         # Availability is intentionally not exposed to customers. The order is
         # accepted and stock is checked only after successful payment.
-        rows.append([InlineKeyboardButton(text=f"🔑 [{plan['duration']}] » ₹{shown_inr:.2f}",callback_data=f"plan:{plan['id']}")])
-    rows.append([InlineKeyboardButton(text="🔙 Back to Shop",callback_data="shop")])
+        rows.append([InlineKeyboardButton(text=f"🔑 [{plan['duration']}] » ₹{shown_inr:.2f}",callback_data=f"plan:{plan['id']}", style="primary")])
+    rows.append([InlineKeyboardButton(text="🔙 Back to Shop",callback_data="shop", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def success_message(game,duration,quantity,key):
@@ -330,7 +330,7 @@ def no_stock_refund_message(amount):
           "This product is currently out of stock.\n\n"
           f"Your ₹{float(amount):.2f} has been returned to your wallet.\n"
           "Please check back later or contact admin.")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎫 Contact Support",url="https://t.me/subro98")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎫 Contact Support",url="https://t.me/subro98", style="primary")]])
     return text,kb
 
 
@@ -338,7 +338,7 @@ async def notify_referral_reward(referred_user_id):
     reward=await award_referral_after_purchase(referred_user_id)
     if reward:
         try:
-            await bot.send_message(reward["referrer_id"],"🎁 <b>You earned a Referral Trial Key!</b>\n\nYour friend completed their first purchase. Open Referral from the dashboard and choose Root or Non Root to claim your random trial key.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Claim Referral Reward",callback_data="referral")]]))
+            await bot.send_message(reward["referrer_id"],"🎁 <b>You earned a Referral Trial Key!</b>\n\nYour friend completed their first purchase. Open Referral from the dashboard and choose Root or Non Root to claim your random trial key.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Claim Referral Reward",callback_data="referral", style="success")]]))
         except Exception: log.exception("Could not notify referrer")
 
 @dp.callback_query(F.data.startswith("wallet:"))
@@ -396,7 +396,7 @@ async def upi_begin(call:CallbackQuery,state:FSMContext):
             bio=BytesIO();image.save(bio,format="PNG");bio.seek(0)
             qr_image = bio.getvalue()
         caption=(f"💸 <b>{html.escape(payment_title)}</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n🎮 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: {quantity} key(s)\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan this unique QR using any UPI app, including Paytm.\n⚡ Your payment will be verified automatically and your key delivered here.\n⏰ Payment window: 5 minutes.")
-        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}")]])
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}", style="success")]])
         try: await progress.delete()
         except Exception: pass
         await call.message.answer_photo(BufferedInputFile(qr_image,filename="cashfree_upi_qr.png"),caption=caption,reply_markup=kb)
@@ -488,7 +488,7 @@ async def topup_custom_received(message:Message,state:FSMContext):
     await show_topup_method(message,amount)
 
 async def show_topup_method(target,amount):
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🇮🇳 Paytm / UPI (INR)",callback_data=f"topuppay:{amount:.2f}")],[InlineKeyboardButton(text="🔙 Back",callback_data="balance")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🇮🇳 Paytm / UPI (INR)",callback_data=f"topuppay:{amount:.2f}", style="success")],[InlineKeyboardButton(text="🔙 Back",callback_data="balance", style="primary")]])
     await target.answer(f"💰 Deposit amount: <b>₹{amount:.2f}</b>\n\nSelect your payment method:",reply_markup=kb)
 
 async def start_topup_payment(message:Message,amount:float,user_id=None,customer_name=None):
@@ -504,7 +504,7 @@ async def start_topup_payment(message:Message,amount:float,user_id=None,customer
         if not qrbytes:
             qr=qrcode.QRCode(box_size=8,border=3);qr.add_data(payment['qr_value']);qr.make(fit=True);img=qr.make_image(fill_color="black",back_color="white");bio=BytesIO();img.save(bio,format="PNG");qrbytes=bio.getvalue()
         caption=f"💸 <b>{html.escape(title)}</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n💰 Amount: <b>₹{amount:.2f}</b>\n\n📱 Scan using any UPI app, including Paytm. Wallet balance will be credited automatically after payment confirmation."
-        await message.answer_photo(BufferedInputFile(qrbytes,filename="wallet_topup_qr.png"),caption=caption,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}")]]))
+        await message.answer_photo(BufferedInputFile(qrbytes,filename="wallet_topup_qr.png"),caption=caption,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}", style="success")]]))
     except Exception:
         log.exception("Wallet top-up QR creation failed");await expire_order(order['order_id']);await message.answer("Cashfree could not create the QR. No payment was taken. Please try again.")
 
@@ -532,8 +532,8 @@ async def referral_menu(call:CallbackQuery):
          "💡 <b>Reward:</b> After your referred friend completes their first successful purchase, choose Root or Non Root. One available key is selected randomly from matching stock.")
     rows=[]
     if st['pending']:
-        rows=[[InlineKeyboardButton(text="🌳 Claim Root Trial Key",callback_data="refclaim:ROOT"),InlineKeyboardButton(text="📱 Claim Non-Root Trial Key",callback_data="refclaim:NON_ROOT")]]
-    rows.append([InlineKeyboardButton(text="🔙 Back",callback_data="home")])
+        rows=[[InlineKeyboardButton(text="🌳 Claim Root Trial Key",callback_data="refclaim:ROOT", style="success"),InlineKeyboardButton(text="📱 Claim Non-Root Trial Key",callback_data="refclaim:NON_ROOT", style="success")]]
+    rows.append([InlineKeyboardButton(text="🔙 Back",callback_data="home", style="primary")])
     await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("refclaim:"))
@@ -579,41 +579,41 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         msg="💰 <b>Wallet control</b>\nSend <code>USER_ID | AMOUNT</code>. Use a positive amount to credit and a negative amount to deduct."
     elif section=="products":
         cats=[c["name"] for c in await list_categories()]
-        rows=[[InlineKeyboardButton(text=f"📁 {name}",callback_data=f"ac:category:{i}")] for i,name in enumerate(cats)]
-        rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        rows=[[InlineKeyboardButton(text=f"📁 {name}",callback_data=f"ac:category:{i}", style="primary")] for i,name in enumerate(cats)]
+        rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory", style="primary")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories", style="primary")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text("📦 <b>PRODUCT MANAGEMENT</b>\n\nChoose a category to view its products, or add/manage categories.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call);return
     elif section=="stock":
         rows=await admin_stock_summary()
         msg="🔑 <b>Key stock & inventory</b>\n\nChoose a guided action below. You can select an existing category, product and plan, or create any missing item without typing commands.\n\n"+("\n".join(f"Plan {r['plan_id']}: {r['status']} — {r['count']}" for r in rows) if rows else "No stock records yet.")
         kb=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Add / Update Key Stock",callback_data="stk:start")],
-            [InlineKeyboardButton(text="📋 View Products & Plans",callback_data="stk:catalog")],
-            [InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")],
+            [InlineKeyboardButton(text="➕ Add / Update Key Stock",callback_data="stk:start", style="primary")],
+            [InlineKeyboardButton(text="📋 View Products & Plans",callback_data="stk:catalog", style="primary")],
+            [InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin", style="primary")],
         ] + admin_nav_rows())
         await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, );return
     elif section=="payments":
         rows=await admin_orders(20)
         msg="💳 <b>PAYMENTS & ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nSelect an order to inspect its payment details.\n\n"+("\n".join(f"• <b>{o['order_id']}</b> · {o['status']} · ₹{o['amount_inr']:.2f}" for o in rows) if rows else "No payment/order records found.")
-        pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}")] for o in rows]
-        pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}", style="primary")] for o in rows]
+        pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows));await callback_answer(call, );return
     elif section=="resellers":
         rows=await list_resellers(50)
-        kb=[[InlineKeyboardButton(text=f"👑 {r['full_name'] or r['user_id']} · {r['user_id']}",callback_data=f"admres:{r['user_id']}:0")] for r in rows]
-        kb += [[InlineKeyboardButton(text="➕ Add reseller",callback_data="admres:add")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:resellers")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        kb=[[InlineKeyboardButton(text=f"👑 {r['full_name'] or r['user_id']} · {r['user_id']}",callback_data=f"admres:{r['user_id']}:0", style="primary")] for r in rows]
+        kb += [[InlineKeyboardButton(text="➕ Add reseller",callback_data="admres:add", style="primary")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:resellers", style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text("👑 <b>RESELLER MANAGEMENT</b>\nTap a reseller to remove access, or add a user by Telegram ID.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback_answer(call); return
     elif section=="broadcast":
-        kb=[[InlineKeyboardButton(text="👥 All users",callback_data="bc:all")],[InlineKeyboardButton(text="🛍️ Customers",callback_data="bc:customers")],[InlineKeyboardButton(text="👑 Resellers",callback_data="bc:resellers")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        kb=[[InlineKeyboardButton(text="👥 All users",callback_data="bc:all", style="primary")],[InlineKeyboardButton(text="🛍️ Customers",callback_data="bc:customers", style="primary")],[InlineKeyboardButton(text="👑 Resellers",callback_data="bc:resellers", style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text("📢 <b>BROADCAST</b>\nChoose who should receive your messages.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback_answer(call); return
     elif section=="coupons":
         coupons=await list_coupons()
-        rows=[[InlineKeyboardButton(text=f"{'🟢' if c['active'] else '⏸️'} {c['code']} · {c['discount_percent']}% · {c['used_count']}/{c['usage_limit'] or '∞'}",callback_data=f"cp:view:{c['code']}")] for c in coupons]
-        rows += [[InlineKeyboardButton(text="➕ Create coupon",callback_data="cp:create")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:coupons")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        rows=[[InlineKeyboardButton(text=f"{'🟢' if c['active'] else '⏸️'} {c['code']} · {c['discount_percent']}% · {c['used_count']}/{c['usage_limit'] or '∞'}",callback_data=f"cp:view:{c['code']}", style="primary")] for c in coupons]
+        rows += [[InlineKeyboardButton(text="➕ Create coupon",callback_data="cp:create", style="primary")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:coupons", style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text("🎟️ <b>COUPON MANAGEMENT</b>\nSelect a coupon to edit, pause or delete.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); await callback_answer(call); return
     elif section=="settings":
         settings=await get_bot_settings()
-        rows=[[InlineKeyboardButton(text=f"⚙️ {k[:25]}: {v[:20]}",callback_data=f"setting:edit:{k}")] for k,v in settings.items()]
-        rows += [[InlineKeyboardButton(text="➕ Add / change setting",callback_data="setting:add")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:settings")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+        rows=[[InlineKeyboardButton(text=f"⚙️ {k[:25]}: {v[:20]}",callback_data=f"setting:edit:{k}", style="primary")] for k,v in settings.items()]
+        rows += [[InlineKeyboardButton(text="➕ Add / change setting",callback_data="setting:add", style="primary")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:settings", style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text("⚙️ <b>BOT SETTINGS</b>\nSelect a saved setting or add a key/value setting.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); await callback_answer(call); return
     elif section=="logs":
         rows=await recent_admin_logs(20);msg="📜 <b>Recent admin actions</b>\n"+("\n".join(f"{r['created_at']:%Y-%m-%d %H:%M} · {r['admin_id']} · {r['action']} · {html.escape(r['details'][:120])}" for r in rows) if rows else "No admin actions logged yet.")
@@ -627,8 +627,8 @@ async def admin_payments_list(call:CallbackQuery):
         await callback_answer(call, "Admin access required",show_alert=True);return
     rows=await admin_orders(20)
     msg="💳 <b>PAYMENTS & ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nSelect an order to inspect its payment details.\n\n"+("\n".join(f"• <b>{o['order_id']}</b> · {o['status']} · ₹{o['amount_inr']:.2f}" for o in rows) if rows else "No payment/order records found.")
-    pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}")] for o in rows]
-    pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+    pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}", style="primary")] for o in rows]
+    pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
     await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows));await callback_answer(call, "Payments refreshed")
 
 @dp.callback_query(F.data.startswith("admpay:view:"))
@@ -645,7 +645,7 @@ async def admin_payment_detail(call:CallbackQuery):
          f"💰 Amount: <b>₹{o['amount_inr']:.2f}</b>\n📌 Status: <b>{html.escape(o['status'])}</b>\n"
          f"🏦 Method: {html.escape(o['payment_method'])}\n📅 Created: {dt}\n"
          f"🔑 Key: <code>{html.escape(o.get('key_text') or 'Not delivered / wallet top-up')}</code>")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh status list",callback_data="admpay:list")],[InlineKeyboardButton(text="🔙 Payments",callback_data="adm:payments")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh status list",callback_data="admpay:list", style="primary")],[InlineKeyboardButton(text="🔙 Payments",callback_data="adm:payments", style="success")]])
     await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, )
 
 @dp.message(AdminState.search_user,F.text)
@@ -656,7 +656,7 @@ async def admin_user_search(message:Message,state:FSMContext):
     if not rows:await message.answer("No matching users.",reply_markup=admin_keyboard());return
     for u in rows:
         uname=("@"+u['username']) if u['username'] else "no username"
-        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="View profile",callback_data=f"admuser:{u['user_id']}")]])
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="View profile",callback_data=f"admuser:{u['user_id']}", style="primary")]])
         await message.answer(f"👤 <b>{html.escape(u['full_name'] or 'User')}</b> · {uname}\nID <code>{u['user_id']}</code> · Wallet ₹{u['wallet_balance']:.2f} · {'BANNED' if u['is_banned'] else 'Active'}",reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("admuser:"))
@@ -665,7 +665,7 @@ async def admin_user_profile(call:CallbackQuery):
     uid=int(call.data.split(":",1)[1]);u=await admin_user(uid)
     if not u:await callback_answer(call, "User not found",show_alert=True);return
     action="Unban" if u['is_banned'] else "Ban"
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🚫 {action} user",callback_data=f"admban:{uid}:{0 if u['is_banned'] else 1}")],[InlineKeyboardButton(text="👑 Toggle reseller",callback_data=f"admres:{uid}:{0 if u['is_reseller'] else 1}")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🚫 {action} user",callback_data=f"admban:{uid}:{0 if u['is_banned'] else 1}", style="primary")],[InlineKeyboardButton(text="👑 Toggle reseller",callback_data=f"admres:{uid}:{0 if u['is_reseller'] else 1}", style="primary")]])
     msg=(f"👤 <b>{html.escape(u['full_name'] or 'User')}</b>\nID: <code>{uid}</code>\nUsername: @{html.escape(u['username'] or '—')}\nWallet: ₹{u['wallet_balance']:.2f}\nReseller: {u['is_reseller']}\nBanned: {u['is_banned']}\nOrders: {u['orders']}\nPaid spend: ₹{u['spent']:.2f}\nJoined: {u['created_at']:%Y-%m-%d}")
     await call.message.answer(msg,reply_markup=kb);await callback_answer(call, )
 
@@ -689,8 +689,8 @@ async def admin_res_toggle(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     _,uid,enabled=call.data.split(":");ok=await set_reseller(int(uid),bool(int(enabled)));await admin_log(call.from_user.id,"RESELLER_TOGGLE",f"{uid}={enabled}")
     rows=await list_resellers(50)
-    kb=[[InlineKeyboardButton(text=f"👑 {r['full_name'] or r['user_id']} · {r['user_id']}",callback_data=f"admres:{r['user_id']}:0")] for r in rows]
-    kb += [[InlineKeyboardButton(text="➕ Add reseller",callback_data="admres:add")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:resellers")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]] + admin_nav_rows()
+    kb=[[InlineKeyboardButton(text=f"👑 {r['full_name'] or r['user_id']} · {r['user_id']}",callback_data=f"admres:{r['user_id']}:0", style="primary")] for r in rows]
+    kb += [[InlineKeyboardButton(text="➕ Add reseller",callback_data="admres:add", style="primary")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:resellers", style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
     await call.message.edit_text("👑 <b>RESELLER MANAGEMENT</b>\nTap a reseller to remove access, or add a user by Telegram ID.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback_answer(call, "Reseller status updated" if ok else "User not found",show_alert=True)
 
@@ -698,17 +698,17 @@ async def admin_res_toggle(call:CallbackQuery):
 async def ac_categories(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
     cats=[c["name"] for c in await list_categories()]
-    rows=[[InlineKeyboardButton(text=f"⚙️ {name}",callback_data=f"ac:categorymanage:{i}")] for i,name in enumerate(cats)]
-    rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]]
+    rows=[[InlineKeyboardButton(text=f"⚙️ {name}",callback_data=f"ac:categorymanage:{i}", style="primary")] for i,name in enumerate(cats)]
+    rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory", style="primary")],[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products", style="primary")]]
     await call.message.edit_text("⚙️ <b>MANAGE CATEGORIES</b>\nChoose a category to rename or delete.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call)
 
 async def show_admin_category_products(target, category):
     products=await list_products(category=category,include_empty=True)
-    rows=[[InlineKeyboardButton(text=f"{'🛠️' if p.get('maintenance') else '📦'} {p['name']}",callback_data=f"ac:product:{p['id']}")] for p in products]
+    rows=[[InlineKeyboardButton(text=f"{'🛠️' if p.get('maintenance') else '📦'} {p['name']}",callback_data=f"ac:product:{p['id']}", style="primary")] for p in products]
     # Keep Add Product visible even when this category has no products.
-    rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproductcat")],
-             [InlineKeyboardButton(text="⚙️ Manage this category",callback_data="ac:categorymanage_name")],
-             [InlineKeyboardButton(text="🔙 Categories",callback_data="adm:products")]]
+    rows += [[InlineKeyboardButton(text="➕ Add product",callback_data="ac:addproductcat", style="primary")],
+             [InlineKeyboardButton(text="⚙️ Manage this category",callback_data="ac:categorymanage_name", style="primary")],
+             [InlineKeyboardButton(text="🔙 Categories",callback_data="adm:products", style="primary")]]
     body=("No products in this category yet.\n\nTap ➕ Add product to create the first product." if not products else "Select a product or add a new one.")
     await target.edit_text(f"📁 <b>{html.escape(category)}</b>\n\n📦 <b>PRODUCTS</b>\n{body}",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -729,7 +729,7 @@ async def ac_add_product_to_category(call:CallbackQuery,state:FSMContext):
         await callback_answer(call,"Please open Products and select a category first.",show_alert=True);return
     await state.update_data(stock_category=category,admin_category=category)
     await state.set_state(AdminState.stock_product_name)
-    await call.message.edit_text(f"➕ <b>ADD PRODUCT</b>\nCategory: <b>{html.escape(category)}</b>\n\nSend the new product name here. The product will be created inside this category.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to category",callback_data="ac:categoryback")]]))
+    await call.message.edit_text(f"➕ <b>ADD PRODUCT</b>\nCategory: <b>{html.escape(category)}</b>\n\nSend the new product name here. The product will be created inside this category.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to category",callback_data="ac:categoryback", style="primary")]]))
     await callback_answer(call,"Send product name")
 
 @dp.callback_query(F.data=="ac:categorymanage_name")
@@ -738,7 +738,7 @@ async def ac_category_manage_selected(call:CallbackQuery,state:FSMContext):
     data=await state.get_data();name=data.get("admin_category")
     if not name:await callback_answer(call,"Choose a category first.",show_alert=True);return
     count=await category_products_admin(name);await state.update_data(category_name=name)
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete")],[InlineKeyboardButton(text="🔙 Products in category",callback_data="ac:categoryback")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename", style="primary")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete", style="danger")],[InlineKeyboardButton(text="🔙 Products in category",callback_data="ac:categoryback", style="primary")]])
     await call.message.edit_text(f"⚙️ <b>{html.escape(name)}</b>\nProducts: {count}",reply_markup=kb);await callback_answer(call)
 
 @dp.callback_query(F.data=="ac:categoryback")
@@ -754,7 +754,7 @@ async def ac_category_manage(call:CallbackQuery,state:FSMContext):
     try:name=cats[int(call.data.rsplit(":",1)[1])]
     except (ValueError,IndexError):await callback_answer(call,"Category list changed. Refresh.",show_alert=True);return
     await state.update_data(category_name=name,admin_category=name);count=await category_products_admin(name)
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete")],[InlineKeyboardButton(text="🔙 Manage categories",callback_data="ac:categories")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename", style="primary")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete", style="danger")],[InlineKeyboardButton(text="🔙 Manage categories",callback_data="ac:categories", style="primary")]])
     await call.message.edit_text(f"⚙️ <b>{html.escape(name)}</b>\nProducts: {count}",reply_markup=kb);await callback_answer(call)
 
 @dp.callback_query(F.data=="ac:addcategory")
@@ -773,7 +773,7 @@ async def ac_category_detail(call:CallbackQuery,state:FSMContext):
     except (ValueError,IndexError):await callback_answer(call, "Category list changed. Refresh.",show_alert=True);return
     count=await category_products_admin(name)
     await state.update_data(category_name=name)
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete")],[InlineKeyboardButton(text="🔙 Categories",callback_data="ac:categories")]] + admin_nav_rows())
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename", style="primary")],[InlineKeyboardButton(text="🗑️ Delete category (move products to Other Products)",callback_data="ac:categorydelete", style="danger")],[InlineKeyboardButton(text="🔙 Categories",callback_data="ac:categories", style="primary")]] + admin_nav_rows())
     await call.message.edit_text(f"📁 <b>{html.escape(name)}</b>\nProducts: {count}\nDelete safely moves its products to Other Products; it does not delete sold order history.",reply_markup=kb);await callback_answer(call, )
 
 @dp.callback_query(F.data=="ac:categoryrename")
@@ -789,7 +789,7 @@ async def ac_category_delete(call:CallbackQuery,state:FSMContext):
     if not old:await callback_answer(call, "Select category again.",show_alert=True);return
     ok=bool(await delete_category_admin(old))
     await admin_log(call.from_user.id,"CATEGORY_DELETE_MOVE",old)
-    await call.message.edit_text("✅ Category removed. Its products were moved to Other Products." if ok else "Category not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Categories",callback_data="ac:categories")]]));await callback_answer(call, )
+    await call.message.edit_text("✅ Category removed. Its products were moved to Other Products." if ok else "Category not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Categories",callback_data="ac:categories", style="primary")]]));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("ac:product:"))
 async def ac_product_detail(call:CallbackQuery):
@@ -797,8 +797,8 @@ async def ac_product_detail(call:CallbackQuery):
     pid=int(call.data.rsplit(":",1)[1]);p=await get_product(pid)
     if not p:await callback_answer(call, "Product not found or inactive",show_alert=True);return
     plans=await admin_all_plans(pid)
-    rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}")] for pl in plans]
-    rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}")]] + admin_nav_rows()
+    rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}", style="primary")] for pl in plans]
+    rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}", style="primary")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}", style="primary"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}", style="primary")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}", style="primary")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}", style="danger")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}", style="primary")]] + admin_nav_rows()
     await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nCategory: {html.escape(p['category'])}\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nChoose a plan or action:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("ac:categorybackpid:"))
@@ -817,8 +817,8 @@ async def ac_product_maintenance(call:CallbackQuery):
     p=await get_product(pid)
     if p:
         plans=await admin_all_plans(pid)
-        rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}")] for pl in plans]
-        rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}")]] + admin_nav_rows()
+        rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}", style="primary")] for pl in plans]
+        rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}", style="primary")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}", style="primary"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}", style="primary")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}", style="primary")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}", style="danger")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}", style="primary")]] + admin_nav_rows()
         await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nCategory: {html.escape(p['category'])}",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback_answer(call,"Updated")
 
@@ -838,7 +838,7 @@ async def ac_editcat(call:CallbackQuery,state:FSMContext):
 async def ac_deleteproduct(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     pid=int(call.data.rsplit(":",1)[1])
-    await call.message.edit_text("⚠️ <b>Confirm product deletion</b>\nIf this product has orders or key inventory, it will be safely archived so historical records are not damaged. Otherwise it will be permanently deleted.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑️ Confirm delete",callback_data=f"ac:deleteconfirm:{pid}")],[InlineKeyboardButton(text="↩ Cancel",callback_data=f"ac:product:{pid}")]])); await callback_answer(call)
+    await call.message.edit_text("⚠️ <b>Confirm product deletion</b>\nIf this product has orders or key inventory, it will be safely archived so historical records are not damaged. Otherwise it will be permanently deleted.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑️ Confirm delete",callback_data=f"ac:deleteconfirm:{pid}", style="danger")],[InlineKeyboardButton(text="↩ Cancel",callback_data=f"ac:product:{pid}", style="danger")]])); await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("ac:deleteconfirm:"))
 async def ac_deleteproduct_confirm(call:CallbackQuery):
@@ -846,7 +846,7 @@ async def ac_deleteproduct_confirm(call:CallbackQuery):
     pid=int(call.data.rsplit(":",1)[1]); result=await delete_product_admin(pid)
     if result!="NOT_FOUND": await admin_log(call.from_user.id,"PRODUCT_"+result,str(pid))
     msg={"DELETED":"✅ Product permanently deleted from the database.","ARCHIVED":"✅ Product archived because it has keys or order history. Existing records are preserved.","NOT_FOUND":"Product not found."}.get(result,"Could not delete product.")
-    await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]])); await callback_answer(call)
+    await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products", style="primary")]])); await callback_answer(call)
 
 
 @dp.callback_query(F.data.startswith("ac:addplan:"))
@@ -866,7 +866,7 @@ async def ac_plan_detail(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
     pid=int(call.data.rsplit(":",1)[1]);pl=await get_plan(pid)
     if not pl:await callback_answer(call, "Plan not found",show_alert=True);return
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Edit plan & INR prices",callback_data=f"ac:planedit:{pid}")],[InlineKeyboardButton(text="🔑 Add keys to this plan",callback_data=f"stk:plan:{pid}")],[InlineKeyboardButton(text="🗑️ Deactivate plan",callback_data=f"ac:plandelete:{pid}")],[InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{pl['product_id']}")]] + admin_nav_rows())
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Edit plan & INR prices",callback_data=f"ac:planedit:{pid}", style="primary")],[InlineKeyboardButton(text="🔑 Add keys to this plan",callback_data=f"stk:plan:{pid}", style="primary")],[InlineKeyboardButton(text="🗑️ Deactivate plan",callback_data=f"ac:plandelete:{pid}", style="danger")],[InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{pl['product_id']}", style="primary")]] + admin_nav_rows())
     await call.message.edit_text(f"🗓️ <b>{html.escape(pl['duration'])}</b>\nCustomer: ₹{pl['price_inr']:.2f}\nReseller: ₹{pl['reseller_price_inr']:.2f}\nAvailable keys: {pl['stock']}",reply_markup=kb);await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("ac:planedit:"))
@@ -899,7 +899,7 @@ async def coupon_view(call:CallbackQuery):
     if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
     code=call.data.split(":",2)[2]; c=next((x for x in await list_coupons(100) if x['code']==code),None)
     if not c: await callback_answer(call,"Coupon not found",show_alert=True); return
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=("⏸️ Pause coupon" if c['active'] else "▶️ Activate coupon"),callback_data=f"cp:toggle:{code}")],[InlineKeyboardButton(text="✏️ Edit discount / limit",callback_data=f"cp:edit:{code}")],[InlineKeyboardButton(text="🗑️ Delete coupon",callback_data=f"cp:delete:{code}")],[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons")]] + admin_nav_rows())
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=("⏸️ Pause coupon" if c['active'] else "▶️ Activate coupon"),callback_data=f"cp:toggle:{code}", style="primary")],[InlineKeyboardButton(text="✏️ Edit discount / limit",callback_data=f"cp:edit:{code}", style="primary")],[InlineKeyboardButton(text="🗑️ Delete coupon",callback_data=f"cp:delete:{code}", style="danger")],[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons", style="primary")]] + admin_nav_rows())
     await call.message.edit_text(f"🎟️ <b>{html.escape(code)}</b>\nDiscount: {c['discount_percent']}%\nUsage: {c['used_count']}/{c['usage_limit'] or 'Unlimited'}\nStatus: {'Active' if c['active'] else 'Paused'}",reply_markup=kb); await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("cp:toggle:"))
@@ -912,7 +912,7 @@ async def coupon_toggle(call:CallbackQuery):
 
 async def coupon_view_refresh(call):
     code=call.data.split(":",2)[2]; c=next((x for x in await list_coupons(100) if x['code']==code),None)
-    if c: await call.message.edit_text(f"🎟️ <b>{html.escape(code)}</b>\nDiscount: {c['discount_percent']}%\nUsage: {c['used_count']}/{c['usage_limit'] or 'Unlimited'}\nStatus: {'Active' if c['active'] else 'Paused'}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=("⏸️ Pause coupon" if c['active'] else "▶️ Activate coupon"),callback_data=f"cp:toggle:{code}")],[InlineKeyboardButton(text="✏️ Edit discount / limit",callback_data=f"cp:edit:{code}")],[InlineKeyboardButton(text="🗑️ Delete coupon",callback_data=f"cp:delete:{code}")],[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons")]] + admin_nav_rows()))
+    if c: await call.message.edit_text(f"🎟️ <b>{html.escape(code)}</b>\nDiscount: {c['discount_percent']}%\nUsage: {c['used_count']}/{c['usage_limit'] or 'Unlimited'}\nStatus: {'Active' if c['active'] else 'Paused'}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=("⏸️ Pause coupon" if c['active'] else "▶️ Activate coupon"),callback_data=f"cp:toggle:{code}", style="primary")],[InlineKeyboardButton(text="✏️ Edit discount / limit",callback_data=f"cp:edit:{code}", style="primary")],[InlineKeyboardButton(text="🗑️ Delete coupon",callback_data=f"cp:delete:{code}", style="danger")],[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons", style="primary")]] + admin_nav_rows()))
 
 @dp.callback_query(F.data.startswith("cp:edit:"))
 async def coupon_edit_start(call:CallbackQuery,state:FSMContext):
@@ -924,7 +924,7 @@ async def coupon_edit_start(call:CallbackQuery,state:FSMContext):
 async def coupon_delete(call:CallbackQuery):
     if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
     code=call.data.split(":",2)[2]; ok=await delete_coupon(code); await admin_log(call.from_user.id,"COUPON_DELETE",code)
-    await call.message.edit_text("✅ Coupon deleted." if ok else "Coupon not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons")]])); await callback_answer(call)
+    await call.message.edit_text("✅ Coupon deleted." if ok else "Coupon not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons", style="primary")]])); await callback_answer(call)
 
 @dp.callback_query(F.data=="setting:add")
 async def setting_add_start(call:CallbackQuery,state:FSMContext):
@@ -942,7 +942,7 @@ async def setting_edit_start(call:CallbackQuery,state:FSMContext):
 async def broadcast_audience(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
     audience=call.data.split(":",1)[1]; await state.update_data(audience=audience,broadcast_items=[]); await state.set_state(AdminState.broadcast_collect)
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Finish & Preview",callback_data="bc:finish")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Finish & Preview",callback_data="bc:finish", style="success")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel", style="danger")]])
     await call.message.edit_text(f"📢 <b>Broadcast to {audience}</b>\nNow send text, photo, video or other Telegram messages one by one. Use Add another after each message; Finish when ready.",reply_markup=kb); await callback_answer(call)
 
 @dp.message(AdminState.broadcast_collect)
@@ -953,7 +953,7 @@ async def broadcast_collect_message(message:Message,state:FSMContext):
     d=await state.get_data(); items=d.get("broadcast_items",[])
     items.append({"chat_id":message.chat.id,"message_id":message.message_id})
     await state.update_data(broadcast_items=items)
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add another message",callback_data="bc:more")],[InlineKeyboardButton(text="✅ Finish & Preview",callback_data="bc:finish")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add another message",callback_data="bc:more", style="primary")],[InlineKeyboardButton(text="✅ Finish & Preview",callback_data="bc:finish", style="success")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel", style="danger")]])
     await message.answer(f"✅ Message {len(items)} added to broadcast. Add more or finish.",reply_markup=kb)
 
 @dp.callback_query(F.data=="bc:more")
@@ -967,7 +967,7 @@ async def broadcast_finish(call:CallbackQuery,state:FSMContext):
     d=await state.get_data(); items=d.get("broadcast_items",[])
     if not items: await callback_answer(call,"Add at least one message first",show_alert=True); return
     await state.set_state(AdminState.broadcast_confirm)
-    await call.message.edit_text(f"📢 <b>Confirm broadcast</b>\nAudience: {d.get('audience','all')}\nMessages: {len(items)}\nSend these messages to the selected audience?",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Send broadcast",callback_data="bc:send")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel")]] + admin_nav_rows())); await callback_answer(call)
+    await call.message.edit_text(f"📢 <b>Confirm broadcast</b>\nAudience: {d.get('audience','all')}\nMessages: {len(items)}\nSend these messages to the selected audience?",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Send broadcast",callback_data="bc:send", style="success")],[InlineKeyboardButton(text="✖ Cancel",callback_data="bc:cancel", style="danger")]] + admin_nav_rows())); await callback_answer(call)
 
 @dp.callback_query(F.data=="bc:cancel")
 async def broadcast_cancel(call:CallbackQuery,state:FSMContext):
@@ -1033,7 +1033,7 @@ async def admin_button_input(message:Message,state:FSMContext):
         elif action=="category_create":
             ok=await create_category_admin(raw)
             await admin_log(message.from_user.id,"CATEGORY_CREATE",raw) if ok else None
-            await message.answer("✅ Category created. Open Products to select it." if ok else "❌ Category already exists or the name is invalid.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Open Products",callback_data="adm:products")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories")]]))
+            await message.answer("✅ Category created. Open Products to select it." if ok else "❌ Category already exists or the name is invalid.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Open Products",callback_data="adm:products", style="primary")],[InlineKeyboardButton(text="⚙️ Manage categories",callback_data="ac:categories", style="primary")]]))
         elif action=="category_rename":
             old=data["category_name"];ok=await rename_category_admin(old,raw)
             await message.answer("✅ Category renamed." if ok else "Category not found or the new name already exists.",reply_markup=admin_keyboard())
@@ -1066,9 +1066,9 @@ async def admin_button_input(message:Message,state:FSMContext):
 def stock_category_keyboard(categories):
     rows=[]
     for i,cat in enumerate(categories):
-        rows.append([InlineKeyboardButton(text=f"📁 {cat['name']} ({cat['count']})",callback_data=f"stk:cat:{i}")])
-    rows.append([InlineKeyboardButton(text="➕ Create new category",callback_data="stk:newcat")])
-    rows.append([InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel")])
+        rows.append([InlineKeyboardButton(text=f"📁 {cat['name']} ({cat['count']})",callback_data=f"stk:cat:{i}", style="primary")])
+    rows.append([InlineKeyboardButton(text="➕ Create new category",callback_data="stk:newcat", style="primary")])
+    rows.append([InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def show_stock_categories(target, state):
@@ -1083,10 +1083,10 @@ async def show_stock_categories(target, state):
 async def show_stock_products(target, state, category):
     await state.clear()
     products=await list_products(category=category,include_empty=True)
-    rows=[[InlineKeyboardButton(text=f"📦 {p['name']}",callback_data=f"stk:product:{p['id']}")] for p in products]
-    rows += [[InlineKeyboardButton(text="➕ Create new product",callback_data="stk:newproduct")],
-             [InlineKeyboardButton(text="⬅ Change category",callback_data="stk:start")],
-             [InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel")]]
+    rows=[[InlineKeyboardButton(text=f"📦 {p['name']}",callback_data=f"stk:product:{p['id']}", style="primary")] for p in products]
+    rows += [[InlineKeyboardButton(text="➕ Create new product",callback_data="stk:newproduct", style="primary")],
+             [InlineKeyboardButton(text="⬅ Change category",callback_data="stk:start", style="primary")],
+             [InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel", style="danger")]]
     await state.update_data(stock_category=category)
     await target.answer(f"📦 <b>Step 2 of 4 — Choose a product</b>\nCategory: <b>{html.escape(category)}</b>\nSelect a product or create a new one:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -1095,10 +1095,10 @@ async def show_stock_plans(target, state, product_id):
     if not p:
         await target.answer("Product not found. Please start again.");await state.clear();return
     await state.clear()
-    rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · {pl['stock']} in stock",callback_data=f"stk:plan:{pl['id']}")] for pl in p['plans']]
-    rows += [[InlineKeyboardButton(text="➕ Create new plan",callback_data="stk:newplan")],
-             [InlineKeyboardButton(text="⬅ Choose another product",callback_data="stk:backproducts")],
-             [InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel")]]
+    rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · {pl['stock']} in stock",callback_data=f"stk:plan:{pl['id']}", style="primary")] for pl in p['plans']]
+    rows += [[InlineKeyboardButton(text="➕ Create new plan",callback_data="stk:newplan", style="primary")],
+             [InlineKeyboardButton(text="⬅ Choose another product",callback_data="stk:backproducts", style="primary")],
+             [InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel", style="danger")]]
     await state.update_data(stock_product_id=product_id,stock_product_name=p['name'])
     await target.answer(f"🗓️ <b>Step 3 of 4 — Choose a plan</b>\nProduct: <b>{html.escape(p['name'])}</b>\nChoose a plan or create a new one:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -1108,9 +1108,9 @@ async def reward_stock_menu(call:CallbackQuery,state:FSMContext):
         await callback_answer(call, "Admin access required",show_alert=True);return
     await state.clear()
     kb=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌳 Add Root Trial Keys",callback_data="rewardstock:type:ROOT")],
-        [InlineKeyboardButton(text="📱 Add Non-Root Trial Keys",callback_data="rewardstock:type:NON_ROOT")],
-        [InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin")]])
+        [InlineKeyboardButton(text="🌳 Add Root Trial Keys",callback_data="rewardstock:type:ROOT", style="primary")],
+        [InlineKeyboardButton(text="📱 Add Non-Root Trial Keys",callback_data="rewardstock:type:NON_ROOT", style="primary")],
+        [InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin", style="primary")]])
     await call.message.answer("🎁 <b>Referral Reward Key Stock</b>\n\nThis is a separate inventory reserved only for referral rewards. Keys added here will NOT appear in normal shop stock or be sold to customers.",reply_markup=kb)
     await callback_answer(call, )
 
@@ -1135,7 +1135,7 @@ async def reward_stock_receive(message:Message,state:FSMContext):
     added=await add_referral_stock(kind,keys)
     await admin_log(message.from_user.id,"REFERRAL_KEY_UPLOAD",f"type={kind}, added={added}, submitted={len(keys)}")
     await state.clear()
-    await message.answer(f"✅ <b>Referral Reward Stock Updated</b>\n\nType: {kind.replace('_','-')}\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nThese keys are reserved for referral claims only.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add more reward keys",callback_data="rewardstock:menu")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin")]]))
+    await message.answer(f"✅ <b>Referral Reward Stock Updated</b>\n\nType: {kind.replace('_','-')}\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nThese keys are reserved for referral claims only.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add more reward keys",callback_data="rewardstock:menu", style="primary")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin", style="primary")]]))
 
 @dp.callback_query(F.data=="stk:start")
 async def stock_flow_start(call:CallbackQuery,state:FSMContext):
@@ -1200,7 +1200,7 @@ async def stock_product_name(message:Message,state:FSMContext):
         # Product descriptions are optional; create the product with a blank description.
         p=await add_product(name,0,"",data['stock_category'])
         await admin_log(message.from_user.id,"PRODUCT_CREATE",f"{p['id']} {p['name']} category={data['stock_category']}")
-        await message.answer(f"✅ Product created: <b>{html.escape(p['name'])}</b>\nCategory: <b>{html.escape(data['stock_category'])}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 View products in this category",callback_data="ac:categoryback")],[InlineKeyboardButton(text="🏠 Products",callback_data="adm:products")]]))
+        await message.answer(f"✅ Product created: <b>{html.escape(p['name'])}</b>\nCategory: <b>{html.escape(data['stock_category'])}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 View products in this category",callback_data="ac:categoryback", style="primary")],[InlineKeyboardButton(text="🏠 Products",callback_data="adm:products", style="primary")]]))
         await state.update_data(admin_category=data['stock_category'])
         await show_stock_plans(message,state,p['id'])
     except Exception:
@@ -1266,7 +1266,7 @@ async def bulk_plan_input(message:Message,state:FSMContext):
         await message.answer(
             f"✅ <b>{len(created)} plan(s) created successfully!</b>\n\n{summary}\n\n"
             "Now open each plan to upload its keys.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Product",callback_data=f"ac:product:{product_id}")]])
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Product",callback_data=f"ac:product:{product_id}", style="primary")]])
         )
     except Exception:
         log.exception("Bulk plan creation failed")
@@ -1307,7 +1307,7 @@ async def stock_receive_keys(message:Message,state:FSMContext):
     added=await add_stock(plan_id,keys)
     await admin_log(message.from_user.id,"REWARD_KEY_UPLOAD" if data.get("reward_stock_type") else "KEY_BULK_UPLOAD",f"plan={plan_id}, type={data.get('reward_stock_type','SHOP')}, added={added}, submitted={len(keys)}")
     await state.clear()
-    await message.answer(f"✅ <b>{'Reward key stock' if data.get('reward_stock_type') else 'Stock'} upload complete</b>\n\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nYour inventory is updated.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Add more reward keys",callback_data="rewardstock:menu")],[InlineKeyboardButton(text="📋 View inventory",callback_data="stk:catalog")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin")]]))
+    await message.answer(f"✅ <b>{'Reward key stock' if data.get('reward_stock_type') else 'Stock'} upload complete</b>\n\n📥 Submitted: {len(keys)}\n➕ Added: {added}\n♻️ Duplicates skipped: {len(set(keys))-added}\n\nYour inventory is updated.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Add more reward keys",callback_data="rewardstock:menu", style="primary")],[InlineKeyboardButton(text="📋 View inventory",callback_data="stk:catalog", style="primary")],[InlineKeyboardButton(text="🏠 Admin menu",callback_data="stk:admin", style="primary")]]))
 
 @dp.callback_query(F.data=="stk:admin")
 async def stock_back_admin(call:CallbackQuery,state:FSMContext):
