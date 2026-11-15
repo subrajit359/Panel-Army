@@ -88,7 +88,7 @@ class KeyStock(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     key_text: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="AVAILABLE", index=True)
-    order_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("product_plans.id"), index=True)
 
@@ -185,6 +185,9 @@ async def init_db():
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Other Products'",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS maintenance BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE key_stock ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
+            # One order may contain multiple keys; order_id must therefore be non-unique on key_stock.
+            "ALTER TABLE key_stock DROP CONSTRAINT IF EXISTS key_stock_order_id_key",
+            "CREATE INDEX IF NOT EXISTS ix_key_stock_order_id ON key_stock (order_id) WHERE order_id IS NOT NULL",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS duration VARCHAR(80) NOT NULL DEFAULT '1 Day'",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER NOT NULL DEFAULT 1",
@@ -253,11 +256,11 @@ async def create_category_admin(name):
     name=(name or "").strip()
     if not name or len(name)>100: return False
     async with Session() as s:
-        exists=await s.get(ProductCategory,name)
-        product_exists=await s.scalar(select(func.count(Product.id)).where(Product.category==name))
-        if exists or product_exists: return False
-        s.add(ProductCategory(name=name))
-        await s.commit()
+        async with s.begin():
+            exists=await s.scalar(select(func.count(ProductCategory.name)).where(func.lower(func.trim(ProductCategory.name))==name.casefold()))
+            product_exists=await s.scalar(select(func.count(Product.id)).where(func.lower(func.trim(Product.category))==name.casefold()))
+            if exists or product_exists: return False
+            s.add(ProductCategory(name=name))
         return True
 
 async def list_products(category=None, include_empty=False):
@@ -377,7 +380,7 @@ async def create_order(user_id, plan_id, amount, quantity=1, payment_method="CAS
 async def get_order(order_id):
     async with Session() as s:
         o=await s.get(Order,order_id)
-        return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,"duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"created_at":o.created_at} if o else None
+        return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,"duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"cashfree_payment_link":o.cashfree_payment_link,"created_at":o.created_at} if o else None
 
 async def expire_order(order_id):
     async with Session() as s:
@@ -529,8 +532,17 @@ async def add_product(name, price, description, category="Other Products"):
         raise ValueError("Invalid product name or category")
     async with Session() as s:
         async with s.begin():
-            cat=await s.get(ProductCategory, category)
-            if not cat:
+            duplicate=await s.scalar(select(func.count(Product.id)).where(
+                func.lower(func.trim(Product.name))==name.casefold(),
+                func.lower(func.trim(Product.category))==category.casefold(),
+                Product.active==True
+            ))
+            if duplicate:
+                raise ValueError("A product with this name already exists in this category")
+            existing_category=await s.scalar(select(ProductCategory.name).where(func.lower(func.trim(ProductCategory.name))==category.casefold()).limit(1))
+            if existing_category:
+                category=existing_category
+            else:
                 s.add(ProductCategory(name=category))
             p=Product(name=name,price_inr=price,description=description or "",category=category,active=True,maintenance=False)
             s.add(p)
@@ -721,13 +733,32 @@ async def set_reseller_pricing(plan_id, inr, usd):
         pl.reseller_price_inr=inr;pl.reseller_price_usd=usd;await s.commit();return True
 
 async def edit_product(product_id, name=None, category=None, description=None):
+    if name is not None:
+        name=str(name).strip()
+        if not name or len(name)>160: raise ValueError("Invalid product name")
+    if category is not None:
+        category=str(category).strip()
+        if not category or len(category)>100: raise ValueError("Invalid category name")
     async with Session() as s:
-        p=await s.get(Product,product_id)
-        if not p:return False
-        if name is not None:p.name=name
-        if category is not None:p.category=category
-        if description is not None:p.description=description
-        await s.commit();return True
+        async with s.begin():
+            p=await s.get(Product,product_id)
+            if not p:return False
+            target_name=name if name is not None else p.name
+            target_category=category if category is not None else p.category
+            duplicate=await s.scalar(select(func.count(Product.id)).where(
+                Product.id!=product_id,Product.active==True,
+                func.lower(func.trim(Product.name))==target_name.casefold(),
+                func.lower(func.trim(Product.category))==target_category.casefold()
+            ))
+            if duplicate: raise ValueError("A product with this name already exists in this category")
+            if name is not None:p.name=name
+            if category is not None:
+                existing=await s.scalar(select(ProductCategory.name).where(func.lower(func.trim(ProductCategory.name))==category.casefold()).limit(1))
+                if existing: category=existing
+                else: s.add(ProductCategory(name=category))
+                p.category=category
+            if description is not None:p.description=description
+        return True
 
 async def set_product_maintenance(product_id, enabled):
     async with Session() as s:
@@ -815,14 +846,22 @@ async def admin_all_products():
 
 async def admin_all_plans(product_id):
     async with Session() as s:
-        rows=(await s.scalars(select(ProductPlan).where(ProductPlan.product_id==product_id).order_by(ProductPlan.id))).all()
+        rows=(await s.scalars(select(ProductPlan).where(ProductPlan.product_id==product_id,ProductPlan.active==True).order_by(ProductPlan.id))).all()
         return [{"id":p.id,"duration":p.duration,"price_inr":float(p.price_inr),"reseller_price_inr":float(p.reseller_price_inr),"active":p.active} for p in rows]
 
 async def edit_plan_admin(plan_id, duration=None, price_inr=None, reseller_price_inr=None):
+    if duration is not None:
+        duration=str(duration).strip()
+        if not duration or len(duration)>80: raise ValueError("Invalid plan duration")
+    for value in (price_inr,reseller_price_inr):
+        if value is not None and (float(value)<0 or float(value)>500000): raise ValueError("Invalid plan price")
     async with Session() as s:
         p=await s.get(ProductPlan,plan_id)
         if not p:return False
-        if duration is not None:p.duration=duration
+        if duration is not None:
+            duplicate=await s.scalar(select(func.count(ProductPlan.id)).where(ProductPlan.product_id==p.product_id,func.lower(func.trim(ProductPlan.duration))==duration.casefold(),ProductPlan.id!=plan_id))
+            if duplicate: raise ValueError("Another plan already uses this duration")
+            p.duration=duration
         if price_inr is not None:p.price_inr=price_inr
         if reseller_price_inr is not None:p.reseller_price_inr=reseller_price_inr
         await s.commit();return True
@@ -836,23 +875,25 @@ async def deactivate_plan_admin(plan_id):
 async def rename_category_admin(old_name,new_name):
     new_name=(new_name or "").strip()
     if not new_name or len(new_name)>100:return False
+    if new_name==str(old_name).strip():return True
     async with Session() as s:
-        rows=(await s.scalars(select(Product).where(Product.category==old_name))).all()
-        category=await s.get(ProductCategory,old_name)
-        if not rows and not category:return False
-        if new_name != old_name:
-            collision=await s.get(ProductCategory,new_name)
-            product_collision=await s.scalar(select(func.count(Product.id)).where(Product.category==new_name))
-            if collision or product_collision:return False
-        for product in rows: product.category=new_name
-        if category:
-            await s.delete(category)
-        s.add(ProductCategory(name=new_name))
-        await s.commit();return True
+        async with s.begin():
+            rows=(await s.scalars(select(Product).where(func.lower(func.trim(Product.category))==str(old_name).strip().casefold()))).all()
+            category=await s.get(ProductCategory,old_name)
+            if not rows and not category:return False
+            if new_name.casefold()!=str(old_name).strip().casefold():
+                collision=await s.scalar(select(func.count(ProductCategory.name)).where(func.lower(func.trim(ProductCategory.name))==new_name.casefold()))
+                product_collision=await s.scalar(select(func.count(Product.id)).where(func.lower(func.trim(Product.category))==new_name.casefold()))
+                if collision or product_collision:return False
+            for product in rows: product.category=new_name
+            if category: await s.delete(category)
+            # Remove any duplicate saved folder rows only after checking collision above.
+            s.add(ProductCategory(name=new_name))
+        return True
 
 async def category_products_admin(name):
     async with Session() as s:
-        return int(await s.scalar(select(func.count(Product.id)).where(Product.category==name)) or 0)
+        return int(await s.scalar(select(func.count(Product.id)).where(Product.category==name,Product.active==True)) or 0)
 
 
 async def list_resellers(limit=50):

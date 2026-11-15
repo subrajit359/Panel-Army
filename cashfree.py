@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import base64
 import binascii
+import uuid
 from datetime import datetime, timedelta, timezone
 from config import CASHFREE_APP_ID, CASHFREE_SECRET_KEY, CASHFREE_ENV, PUBLIC_BASE_URL
 
@@ -41,6 +42,91 @@ async def close_cashfree_session():
 
 def _headers():
     return {"x-client-id": CASHFREE_APP_ID, "x-client-secret": CASHFREE_SECRET_KEY, "x-api-version": API_VERSION, "Content-Type": "application/json"}
+
+async def create_payment_link(order_id: str, amount: float, telegram_user_id: int, customer_name: str, phone: str, payment_description: str = "Panel Army purchase"):
+    """Create a unique Cashfree Payment Link for one Panel Army order.
+
+    Payment Links use POST /links and do not call the restricted POST /orders/pay
+    S2S QR-initiation endpoint. Partial payments and Cashfree SMS/email delivery
+    are disabled; the bot shares the returned URL directly in Telegram.
+    """
+    if not PUBLIC_BASE_URL:
+        raise RuntimeError("PUBLIC_BASE_URL is required for Cashfree payment notifications")
+    link_expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(timespec="seconds")
+    payload = {
+        "link_id": str(order_id)[:50],
+        "link_amount": round(float(amount), 2),
+        "link_currency": "INR",
+        "link_purpose": (payment_description or f"Panel Army {order_id}")[:200],
+        "link_partial_payments": False,
+        "link_expiry_time": link_expiry,
+        "customer_details": {
+            "customer_name": (customer_name or "Telegram User")[:100],
+            "customer_phone": str(phone).strip(),
+        },
+        "link_notify": {"send_email": False, "send_sms": False},
+        "link_auto_reminders": False,
+        "link_meta": {
+            "notify_url": f"{PUBLIC_BASE_URL}/cashfree/webhook",
+            "return_url": "https://t.me/",
+            "payment_methods": "upi",
+            "upi_intent": True,
+        },
+    }
+    headers = _headers()
+    # A deterministic idempotency key makes safe retries of this order less
+    # likely to create multiple payment links after a network timeout.
+    headers["x-idempotency-key"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"panel-army-cashfree-link:{order_id}"))
+    session = await _get_session()
+    async with session.post(f"{API_BASE}/links", headers=headers, json=payload) as resp:
+        created = await resp.json(content_type=None)
+        if resp.status not in (200, 201):
+            code = created.get("code") if isinstance(created, dict) else None
+            message = created.get("message") if isinstance(created, dict) else None
+            raise RuntimeError(f"Cashfree Payment Link creation error {resp.status}: {code or 'provider_error'} {str(message or '')[:180]}")
+    link_url = created.get("link_url") if isinstance(created, dict) else None
+    returned_link_id = created.get("link_id") if isinstance(created, dict) else None
+    if not link_url or not isinstance(link_url, str) or not link_url.startswith("https://"):
+        raise RuntimeError("Cashfree accepted Payment Link request but returned no valid HTTPS link")
+    if returned_link_id and returned_link_id != order_id:
+        raise RuntimeError("Cashfree returned a Payment Link ID that does not match the order")
+    return {
+        "link_id": returned_link_id or order_id,
+        "link_url": link_url,
+        "link_status": created.get("link_status", "ACTIVE"),
+        "link_expiry_time": created.get("link_expiry_time") or link_expiry,
+    }
+
+
+async def fetch_payment_link(link_id: str):
+    """Fetch authoritative Payment Link state from Cashfree."""
+    session = await _get_session()
+    async with session.get(f"{API_BASE}/links/{link_id}", headers=_headers()) as response:
+        body = await response.json(content_type=None)
+        if response.status == 200:
+            return body
+        code = body.get("code") if isinstance(body, dict) else None
+        raise RuntimeError(f"Cashfree fetch Payment Link error {response.status}: {code or 'provider_error'}")
+
+
+def payment_link_is_paid(link: dict, expected_amount: float, expected_link_id: str | None = None) -> bool:
+    """Require a fully paid, exact-amount link before fulfilling an order."""
+    if not isinstance(link, dict):
+        return False
+    if expected_link_id and link.get("link_id") != expected_link_id:
+        return False
+    try:
+        link_amount = round(float(link.get("link_amount") or 0), 2)
+        amount_paid = round(float(link.get("link_amount_paid") or 0), 2)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(link.get("link_status", "")).upper() == "PAID"
+        and abs(link_amount - round(float(expected_amount), 2)) < 0.005
+        and abs(amount_paid - round(float(expected_amount), 2)) < 0.005
+        and str(link.get("link_currency", "INR")).upper() == "INR"
+    )
+
 
 async def create_upi_qr_order(order_id: str, amount: float, telegram_user_id: int, customer_name: str, phone: str, payment_description: str = "Panel Army purchase"):
     """Create a Cashfree PG order, then initiate its UPI QR payment."""

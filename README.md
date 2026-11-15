@@ -112,3 +112,17 @@ Start with these defaults for one bot process. Increase pool size only after che
 - Custom bulk quantities are validated (1–100), top-ups are validated (₹10–₹50,000), and product/category callback data is kept within Telegram's callback-data size limit.
 
 For production, monitor AWS RDS connection count, CPU, free memory and query latency before increasing `DB_POOL_SIZE`; each running bot process owns its own pool. Never share `DATABASE_URL`, Cashfree secrets or the Telegram bot token in chat or logs.
+
+## Admin Management 3.0 update
+
+The catalogue and inventory workflows are now separated:
+
+- **Categories** are folders only: add, rename, delete with confirmation, and view product counts. No category active/inactive switch is provided.
+- **Products** are created from inside a category and can be renamed, moved to another category, placed into/out of maintenance, or safely archived/deleted.
+- **Plans & Pricing** supports adding one plan or bulk-creating plans, customer INR and reseller INR prices, editing duration/prices, and confirmed removal from the active catalogue. Plans with history are deactivated rather than physically destroyed.
+- **Stock Manager** only selects existing categories, products and plans. Catalogue creation is not offered inside the stock upload flow.
+- **Stock imports** show a summary preview and require confirmation before writing keys. Key values are not echoed in the preview or admin log.
+- Product names are checked for duplicates within a category (case-insensitive); category creation and renaming use case-insensitive collision checks.
+- The duplicate `ac:category:` callback registration has been removed so category selection has one unambiguous handler.
+
+The existing PostgreSQL crash-fix migration and global stock-key deduplication are retained. This update has been syntax-checked and statically inspected; live Telegram, Railway, PostgreSQL and Cashfree testing still needs to be performed in the deployed environment.
