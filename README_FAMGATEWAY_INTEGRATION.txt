@@ -3,11 +3,11 @@ PANEL ARMY STORE — FAMGATEWAY DYNAMIC UPI QR INTEGRATION
 PAYMENT FLOW
 1. A customer selects a product plan or wallet top-up.
 2. Panel Army creates a local pending order and calls FamGateway POST /api/create-order.
-3. The bot sends the returned dynamic QR image in Telegram. UPI intent and hosted checkout buttons are shown when returned by FamGateway.
+3. The bot sends only the returned dynamic QR image and payment details in Telegram. Customers scan or screenshot the QR and pay in any UPI app; no buttons are shown below the QR.
 4. The bot checks status in the background every 4 seconds. The FamGateway webhook is also enabled as a fast path.
 5. A webhook is accepted only after HMAC-SHA256 validation using the FamGateway API key and a second server-to-server verification.
 6. Order ID and exact INR amount are checked before fulfillment. Database row locks and unique wallet transaction references prevent duplicate key delivery or wallet credit.
-7. The customer can still use Check Payment Status as a manual fallback.
+7. Customers do not need to press a status button; background polling and the webhook verify payments automatically.
 
 RAILWAY VARIABLES
 Required:

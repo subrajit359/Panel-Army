@@ -428,22 +428,30 @@ async def upi_begin(call:CallbackQuery,state:FSMContext):
     user=await get_user(call.from_user.id)
     if not user or not user.get("phone"):
         await progress.edit_text("Please restart the bot and share your phone number first.");return
-    unit=p['reseller_price_inr'] if user and user['is_reseller'] else p['price_inr'];amount=round(unit*quantity,2)
+    is_reseller=bool(user and user['is_reseller'])
+    unit=p['reseller_price_inr'] if is_reseller else p['price_inr']
+    unit_usd=p['reseller_price_usd'] if is_reseller else p['price_usd']
+    amount=round(unit*quantity,2)
+    amount_usd=round(unit_usd*quantity,2)
     order=await create_order(call.from_user.id,plan_id,amount,quantity,"FAM")
     try:
         note=f"Panel Army {order['order_id']} · {p['product_name']} {p['duration']}"
         payment=await fam_create_qr(amount,call.from_user.full_name or f"user{call.from_user.id}",user['phone'],note)
         await set_famgateway_order_id(order['order_id'],payment['order_id'])
-        caption=(f"🛒 <b>PANEL ARMY · UPI PAYMENT</b>\n\n📦 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: {quantity} key(s)\n💰 Amount: <b>₹{payment['amount']:.2f}</b>\n🆔 Order ID: <code>{order['order_id']}</code>\n\n📲 Scan this QR using any UPI app.\n⚡ Payment is verified automatically; your key will be delivered here after FamGateway confirms payment.\n⏳ Please complete payment before the QR expires.")
-        rows=[]
-        if payment.get("upi_intent"):
-            rows.append([InlineKeyboardButton(text="📲 Pay in UPI App",url=payment["upi_intent"],style="success")])
-        if payment.get("checkout_url"):
-            rows.append([InlineKeyboardButton(text="🌐 Open Payment Page",url=payment["checkout_url"],style="primary")])
-        rows.append([InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}",style="primary")])
+        expiry=payment.get('expires_at_ist')
+        expiry_line=(f"⏰ QR Expires: <b>{html.escape(str(expiry))}</b>\n" if expiry else "⏰ Complete payment before the QR expires.\n")
+        caption=(f"💸 <b>PAYMENT FOR {html.escape(p['product_name'])} ({html.escape(p['duration'])})</b>\n"
+                 f"📦 Quantity: {quantity} key(s)\n"
+                 f"💵 Total Amount (USD): <b>${amount_usd:.2f}</b>\n"
+                 f"💰 Total Amount (INR): <b>₹{payment['amount']:.2f}</b>\n"
+                 f"🆔 Ref ID: <code>{order['order_id']}</code>\n\n"
+                 "📲 Scan this UPI QR with Paytm, PhonePe, or any UPI app.\n"
+                 "⚡ Payment is verified automatically; your key will be delivered here after confirmation.\n"
+                 f"{expiry_line}")
         try: await progress.delete()
         except Exception: pass
-        await call.message.answer_photo(photo=payment['qr_url'],caption=caption,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        # QR-only payment message: no UPI intent, checkout, or status buttons.
+        await call.message.answer_photo(photo=payment['qr_url'],caption=caption)
         asyncio.create_task(monitor_famgateway_order(order['order_id']))
     except Exception:
         log.exception("FamGateway QR creation failed")
@@ -524,12 +532,16 @@ async def start_topup_payment(message:Message,amount:float,user_id=None,customer
     try:
         payment=await fam_create_qr(amount,customer_name,u['phone'],f"Panel Army wallet top-up {order['order_id']}")
         await set_famgateway_order_id(order['order_id'],payment['order_id'])
-        caption=f"💰 <b>WALLET TOP-UP · UPI PAYMENT</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n💵 Amount: <b>₹{payment['amount']:.2f}</b>\n\n📲 Scan this QR using any UPI app. Your wallet will be credited automatically after FamGateway confirms payment.\n⏳ Please complete payment before the QR expires."
-        rows=[]
-        if payment.get("upi_intent"):rows.append([InlineKeyboardButton(text="📲 Pay in UPI App",url=payment["upi_intent"],style="success")])
-        if payment.get("checkout_url"):rows.append([InlineKeyboardButton(text="🌐 Open Payment Page",url=payment["checkout_url"],style="primary")])
-        rows.append([InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}",style="primary")])
-        await message.answer_photo(photo=payment['qr_url'],caption=caption,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        expiry=payment.get('expires_at_ist')
+        expiry_line=(f"⏰ QR Expires: <b>{html.escape(str(expiry))}</b>\n" if expiry else "⏰ Complete payment before the QR expires.\n")
+        caption=(f"💰 <b>WALLET TOP-UP</b>\n"
+                 f"💵 Total Amount (INR): <b>₹{payment['amount']:.2f}</b>\n"
+                 f"🆔 Ref ID: <code>{order['order_id']}</code>\n\n"
+                 "📲 Scan this UPI QR with Paytm, PhonePe, or any UPI app.\n"
+                 "⚡ Your wallet will be credited automatically after payment confirmation.\n"
+                 f"{expiry_line}")
+        # QR-only wallet top-up message; verification continues in the background.
+        await message.answer_photo(photo=payment['qr_url'],caption=caption)
         asyncio.create_task(monitor_famgateway_order(order['order_id']))
     except Exception:
         log.exception("FamGateway wallet top-up QR creation failed")
