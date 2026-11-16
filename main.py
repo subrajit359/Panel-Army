@@ -386,15 +386,17 @@ async def product_view(call:CallbackQuery):
     reseller=bool(user and user['is_reseller'])
     lines=[f"🏪 <b>PANEL ARMY</b>",f"🎮 <b>{html.escape(p['name'])}</b>","━━━━━━━━━━━━━━━━━━","⚡ <b>AVAILABLE PLANS:</b>"]
     for pl in p['plans']:
-        customer_price=float(pl['price_inr']); reseller_price=float(pl['reseller_price_inr'])
-        savings=max(0.0,customer_price-reseller_price)
+        customer_price=float(pl['price_inr'])
         status="✅ Online"
         lines.extend([
             f"\n┌ 🔹 {html.escape(pl['duration'])}",
             f"│ 📊 Status: {status}",
-            f"│ 🏷️ Price: ₹{customer_price:.2f}",
-            f"└ 👑 Reseller: ₹{reseller_price:.2f} (Save ₹{savings:.2f})",
+            f"{'│' if reseller else '└'} 🏷️ Price: ₹{customer_price:.2f}",
         ])
+        if reseller:
+            reseller_price=float(pl['reseller_price_inr'])
+            savings=max(0.0,customer_price-reseller_price)
+            lines.append(f"└ 👑 Reseller: ₹{reseller_price:.2f} (Save ₹{savings:.2f})")
     lines.extend(["━━━━━━━━━━━━━━━━━━","🎯 Select your plan below:"])
     await call.message.edit_text("\n".join(lines),reply_markup=plan_keyboard(p,user));await callback_answer(call, )
 
@@ -408,8 +410,12 @@ async def plan_view(call:CallbackQuery):
     if p.get("maintenance"):
         await call.message.edit_text(f"🛠️ <b>{html.escape(p['product_name'])} is under maintenance.</b>\nPlease check back later.",reply_markup=home_keyboard()); return
     u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit,2)
-    savings=max(0.0,p['price_inr']-p['reseller_price_inr']);status="✅ Online"
-    plan_card=(f"┌ 🔹 {html.escape(p['duration'])}\n│ 📊 Status: {status}\n│ 🏷️ Price: ₹{p['price_inr']:.2f}\n└ 👑 Reseller: ₹{p['reseller_price_inr']:.2f} (Save ₹{savings:.2f})")
+    status="✅ Online"
+    if reseller:
+        savings=max(0.0,p['price_inr']-p['reseller_price_inr'])
+        plan_card=(f"┌ 🔹 {html.escape(p['duration'])}\n│ 📊 Status: {status}\n│ 🏷️ Price: ₹{p['price_inr']:.2f}\n└ 👑 Reseller: ₹{p['reseller_price_inr']:.2f} (Save ₹{savings:.2f})")
+    else:
+        plan_card=(f"┌ 🔹 {html.escape(p['duration'])}\n│ 📊 Status: {status}\n└ 🏷️ Price: ₹{p['price_inr']:.2f}")
     await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])}</b>\n━━━━━━━━━━━━━━━━━━\n{plan_card}\n\n📦 Quantity: <b>1 key</b>\n💰 Your total: <b>₹{amount:.2f}</b>\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose a payment method:",reply_markup=quantity_payment_keyboard(plan_id,1,amount,u['wallet_balance'] if u else 0,p['product_id']));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("bulk:"))
