@@ -316,14 +316,13 @@ async def list_products(category=None, include_empty=False):
         return output
 
 async def get_product(product_id):
-    """Fetch a customer-facing product and its plans in one round trip.
-
-    Stock is deliberately not queried here: the shop does not reveal availability,
-    and inventory is checked atomically only after successful payment.
-    """
+    """Fetch a customer-facing product, plan prices and available stock counts."""
     async with Session() as s:
+        stock_count = select(func.count(KeyStock.id)).where(
+            KeyStock.plan_id == ProductPlan.id, KeyStock.status == "AVAILABLE"
+        ).correlate(ProductPlan).scalar_subquery()
         rows = (await s.execute(
-            select(Product, ProductPlan)
+            select(Product, ProductPlan, stock_count.label("stock"))
             .outerjoin(ProductPlan, (ProductPlan.product_id == Product.id) & (ProductPlan.active == True))
             .where(Product.id == product_id, Product.active == True)
             .order_by(ProductPlan.id)
@@ -336,8 +335,8 @@ async def get_product(product_id):
             "price_inr": float(pl.price_inr), "price_usd": float(pl.price_usd),
             "reseller_price_inr": float(pl.reseller_price_inr),
             "reseller_price_usd": float(pl.reseller_price_usd),
-            "stock": 0,
-        } for _, pl in rows if pl is not None]
+            "stock": int(stock or 0),
+        } for _, pl, stock in rows if pl is not None]
         return {
             "id": product.id, "name": product.name, "description": product.description,
             "category": product.category, "maintenance": bool(product.maintenance), "plans": plans,
@@ -573,6 +572,51 @@ async def add_plan(product_id,duration,price_inr,price_usd,reseller_price_inr,re
     result = await add_plans_bulk(product_id, [(duration, price_inr, price_usd, reseller_price_inr, reseller_price_usd)])
     return result[0] if result else None
 
+
+
+async def add_or_update_customer_plan(product_id, duration, customer_price):
+    duration=str(duration or "").strip(); customer_price=float(customer_price)
+    if not duration or len(duration)>80 or not 0<=customer_price<=500000:
+        raise ValueError("Invalid plan duration or customer price")
+    async with Session() as s:
+        async with s.begin():
+            await s.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": int(product_id)})
+            product=await s.get(Product,product_id)
+            if not product: raise ValueError("Product not found")
+            plan=await s.scalar(select(ProductPlan).where(
+                ProductPlan.product_id==product_id,
+                func.lower(func.trim(ProductPlan.duration))==duration.casefold()
+            ).with_for_update())
+            if plan:
+                plan.price_inr=customer_price
+                plan.price_usd=0
+                return {"id":plan.id,"duration":plan.duration,"created":False}
+            had_plans=bool(await s.scalar(select(func.count(ProductPlan.id)).where(ProductPlan.product_id==product_id)))
+            plan=ProductPlan(product_id=product_id,duration=duration,price_inr=customer_price,
+                price_usd=0,reseller_price_inr=customer_price,reseller_price_usd=0)
+            s.add(plan); await s.flush()
+            if not had_plans:
+                await s.execute(text("UPDATE key_stock SET plan_id=:plan WHERE product_id=:product AND plan_id IS NULL"), {"plan":plan.id,"product":product_id})
+            return {"id":plan.id,"duration":plan.duration,"created":True}
+
+
+async def update_reseller_price_by_duration(product_id, duration, reseller_price):
+    duration=str(duration or "").strip(); reseller_price=float(reseller_price)
+    if not duration or not 0<=reseller_price<=500000:
+        raise ValueError("Invalid plan duration or reseller price")
+    async with Session() as s:
+        async with s.begin():
+            plan=await s.scalar(select(ProductPlan).where(
+                ProductPlan.product_id==product_id,
+                func.lower(func.trim(ProductPlan.duration))==duration.casefold(),
+                ProductPlan.active==True
+            ).with_for_update())
+            if not plan: raise ValueError("Customer plan not found. Add the customer plan first using the same duration.")
+            plan.reseller_price_inr=reseller_price
+            plan.reseller_price_usd=0
+            return {"id":plan.id,"duration":plan.duration}
+
+
 async def add_plans_bulk(product_id, plans):
     """Atomically create a batch; reject duplicate durations before any insert."""
     cleaned=[]
@@ -606,6 +650,31 @@ async def add_plans_bulk(product_id, plans):
                 created.append({'id':pl.id,'duration':pl.duration})
             return created
 
+async def find_duplicate_stock_keys(keys):
+    """Return submitted keys already present anywhere in stock, regardless of status."""
+    normalized=list(dict.fromkeys(str(k).strip() for k in keys if str(k).strip()))
+    if not normalized:
+        return []
+    wanted={k.casefold():k for k in normalized}
+    async with Session() as s:
+        rows=(await s.scalars(select(KeyStock.key_text).where(
+            func.lower(func.btrim(KeyStock.key_text)).in_(list(wanted.keys()))
+        ))).all()
+    existing={str(value).strip().casefold() for value in rows}
+    return [key for key in normalized if key.casefold() in existing]
+
+async def remove_stock_key(key_id):
+    """Delete an inventory row only if it has not been sold; sold records are immutable."""
+    async with Session() as s:
+        async with s.begin():
+            key=await s.scalar(select(KeyStock).where(KeyStock.id==key_id).with_for_update())
+            if not key:
+                return "NOT_FOUND"
+            if key.status=="SOLD" or key.order_id:
+                return "SOLD"
+            await s.delete(key)
+            return "REMOVED"
+
 async def add_stock(plan_id, keys):
     """Globally deduplicate keys (case/outer-whitespace insensitive), including concurrent imports."""
     normalized=list(dict.fromkeys(str(k).strip() for k in keys if str(k).strip()))
@@ -624,7 +693,13 @@ async def add_stock(plan_id, keys):
 
 async def list_orders(user_id):
     async with Session() as s:
-        stmt=(select(Order, Product.name).outerjoin(Product, Product.id==Order.product_id).where(Order.user_id==user_id, Order.payment_method.notin_(("TOPUP", "FAM_TOPUP"))).order_by(Order.created_at.desc()).limit(30))
+        stmt=(select(Order, Product.name).outerjoin(Product, Product.id==Order.product_id).where(
+            Order.user_id==user_id,
+            Order.payment_method.notin_(("TOPUP", "FAM_TOPUP")),
+            Order.status=="PAID",
+            Order.key_text.is_not(None),
+            Order.key_text!="",
+        ).order_by(Order.created_at.desc()).limit(30))
         rows=(await s.execute(stmt)).all()
         return [{"order_id":o.order_id,"user_id":o.user_id,"product_name":name or "Wallet Balance Top-up","amount_inr":float(o.amount_inr),"status":o.status,"duration":o.duration,"quantity":o.quantity,"key_text":o.key_text,"created_at":o.created_at,"payment_method":o.payment_method} for o,name in rows]
 
@@ -745,7 +820,7 @@ async def admin_stock_summary():
         rows=(await s.execute(select(KeyStock.plan_id,KeyStock.status,func.count(KeyStock.id)).group_by(KeyStock.plan_id,KeyStock.status))).all()
         return [{"plan_id":pid,"status":status,"count":int(count)} for pid,status,count in rows]
 
-async def set_reseller_pricing(plan_id, inr, usd):
+async def set_reseller_pricing(plan_id, inr, usd=0):
     async with Session() as s:
         pl=await s.get(ProductPlan,plan_id)
         if not pl:return False
@@ -850,12 +925,25 @@ async def refund_history(limit=20):
         rows=(await s.scalars(select(RefundRecord).order_by(RefundRecord.created_at.desc()).limit(limit))).all()
         return [{"order_id":r.order_id,"status":r.status,"note":r.note,"admin_id":r.admin_id,"created_at":r.created_at} for r in rows]
 
-async def list_keys(plan_id, status=None, limit=50):
+async def list_keys(plan_id, status=None, limit=10, offset=0):
     async with Session() as s:
-        stmt=select(KeyStock).where(KeyStock.plan_id==plan_id).order_by(KeyStock.id.desc()).limit(limit)
+        stmt=(select(KeyStock, Order, User)
+              .outerjoin(Order, Order.order_id==KeyStock.order_id)
+              .outerjoin(User, User.user_id==Order.user_id)
+              .where(KeyStock.plan_id==plan_id)
+              .order_by(KeyStock.id.desc()))
         if status:stmt=stmt.where(KeyStock.status==status.upper())
-        rows=(await s.scalars(stmt)).all()
-        return [{"id":k.id,"status":k.status,"created_at":k.created_at,"order_id":k.order_id} for k in rows]
+        total=int(await s.scalar(select(func.count(KeyStock.id)).where(
+            KeyStock.plan_id==plan_id,
+            *([KeyStock.status==status.upper()] if status else [])
+        )) or 0)
+        rows=(await s.execute(stmt.offset(max(0,offset)).limit(limit))).all()
+        return {"items":[
+            {"id":k.id,"key_text":k.key_text,"status":k.status,"created_at":k.created_at,
+             "order_id":k.order_id,"user_id":(o.user_id if o else None),
+             "username":(u.username if u else None),"phone":(u.phone if u else None)}
+            for k,o,u in rows
+        ],"total":total}
 
 # Button-driven catalogue administration
 async def admin_all_products():
