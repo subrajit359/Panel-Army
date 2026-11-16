@@ -57,6 +57,12 @@ class User(Base):
     referred_by: Mapped[int | None] = mapped_column(BigInteger, index=True)
     referral_rewarded: Mapped[bool] = mapped_column(Boolean, default=False)
 
+
+class Game(Base):
+    __tablename__ = "games"
+    name: Mapped[str] = mapped_column(String(80), primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
 class ProductCategory(Base):
     __tablename__ = "product_categories"
     name: Mapped[str] = mapped_column(String(100), primary_key=True)
@@ -177,6 +183,10 @@ class Order(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Additive game catalogue migration; legacy product rows remain untouched.
+        await conn.execute(text("CREATE TABLE IF NOT EXISTS games (name VARCHAR(80) PRIMARY KEY, active BOOLEAN NOT NULL DEFAULT TRUE)"))
+        await conn.execute(text("INSERT INTO games (name, active) SELECT DISTINCT game, TRUE FROM products WHERE game IS NOT NULL AND btrim(game) <> '' ON CONFLICT (name) DO NOTHING"))
+        await conn.execute(text("INSERT INTO games (name, active) VALUES ('Free Fire', TRUE) ON CONFLICT (name) DO NOTHING"))
         # Additive migrations for databases created by the original starter. Existing data is preserved.
         migrations = [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0",
@@ -255,6 +265,41 @@ async def set_user_phone(user_id, phone):
         if u:
             u.phone=phone
             await s.commit()
+
+async def list_games(active_only=True):
+    async with Session() as s:
+        stmt=select(Game.name).order_by(Game.name)
+        if active_only: stmt=stmt.where(Game.active == True)
+        return list((await s.scalars(stmt)).all())
+
+async def create_game(name):
+    name=(name or "").strip()
+    if not name or len(name)>80: return False
+    async with Session() as s:
+        existing=await s.get(Game,name)
+        if existing:
+            if existing.active: return False
+            existing.active=True; await s.commit(); return True
+        s.add(Game(name=name,active=True)); await s.commit(); return True
+
+async def rename_game(old,new):
+    new=(new or "").strip()
+    if not new or len(new)>80: return False
+    async with Session() as s:
+        async with s.begin():
+            g=await s.get(Game,old)
+            if not g or (new != old and await s.get(Game,new)): return False
+            if new != old:
+                # Update product ownership in-place; product IDs, plans, stock and order history remain intact.
+                await s.execute(update(Product).where(Product.game==old).values(game=new))
+                g.name=new
+        return True
+
+async def archive_game(name):
+    async with Session() as s:
+        g=await s.get(Game,name)
+        if not g: return False
+        g.active=False; await s.commit(); return True
 
 async def list_categories(game=None):
     async with Session() as s:

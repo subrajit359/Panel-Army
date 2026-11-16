@@ -17,7 +17,7 @@ from db import (init_db, close_db, is_user_banned, get_or_create_user, list_cate
                 admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
                 set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
                 set_bot_setting, get_bot_settings, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats, list_resellers, list_coupons, update_coupon, delete_coupon, set_product_maintenance, find_duplicate_stock_keys, remove_stock_key, delete_category_admin, delete_product_admin,
-                attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, health_check, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, add_or_update_customer_plan, update_reseller_price_by_duration, bulk_customer_plan_prices, bulk_reseller_plan_prices, rename_category_admin, category_products_admin, create_category_admin, add_plans_bulk, payment_reconciliation, search_catalog)
+                attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, health_check, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, add_or_update_customer_plan, update_reseller_price_by_duration, bulk_customer_plan_prices, bulk_reseller_plan_prices, rename_category_admin, category_products_admin, create_category_admin, add_plans_bulk, payment_reconciliation, search_catalog, list_games, create_game, rename_game, archive_game)
 from famgateway import create_qr as fam_create_qr, verify_payment as fam_verify_payment, close_famgateway_session
 
 logging.basicConfig(level=logging.INFO)
@@ -212,13 +212,11 @@ def topup_amount_keyboard():
         [InlineKeyboardButton(text="₹100",callback_data="topup:100", style="primary"),InlineKeyboardButton(text="✍️ Custom Amount",callback_data="topup:custom", style="primary")],
         [InlineKeyboardButton(text="🔙 Dashboard",callback_data="home", style="primary")]])
 
-GAME_NAMES = ["Free Fire", "PUBG Mobile", "8 Ball Pool", "Carrom Pool"]
-
 def game_hash(name):
     return hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
 
-def game_keyboard():
-    rows=[[InlineKeyboardButton(text=f"🎮 {name}",callback_data=f"game:{game_hash(name)}",style="primary")] for name in GAME_NAMES]
+def game_keyboard(games):
+    rows=[[InlineKeyboardButton(text=f"🎮 {name}",callback_data=f"game:{game_hash(name)}",style="primary")] for name in games]
     rows.append([InlineKeyboardButton(text="🔙 Back to Menu",callback_data="home",style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -364,13 +362,13 @@ async def save_start_contact(message:Message,state:FSMContext):
 
 @dp.callback_query(F.data.in_({"shop","store"}))
 async def shop(call:CallbackQuery):
-    await call.message.edit_text("🎮 <b>— CHOOSE A GAME —</b>\\n\\nSelect the game you want to shop for:",reply_markup=game_keyboard())
+    await call.message.edit_text("🎮 <b>— CHOOSE A GAME —</b>\n\nSelect the game you want to shop for:",reply_markup=game_keyboard(await list_games()))
     await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("game:"))
 async def customer_choose_game(call:CallbackQuery):
-    token=call.data.split(":",1)[1]
-    game=next((g for g in GAME_NAMES if game_hash(g)==token),None)
+    token=call.data.rsplit(":",1)[1]
+    game=next((g for g in await list_games() if game_hash(g)==token),None)
     if not game:
         await callback_answer(call,"Game list changed. Reopen the shop.",show_alert=True);return
     cats=await list_categories(game=game)
@@ -383,7 +381,7 @@ async def customer_choose_game(call:CallbackQuery):
 @dp.callback_query(F.data.startswith("category:"))
 async def category(call:CallbackQuery):
     parts=call.data.split(":")
-    game=next((g for g in GAME_NAMES if len(parts)==3 and game_hash(g)==parts[1]),None)
+    game=next((g for g in await list_games() if len(parts)==3 and game_hash(g)==parts[1]),None)
     category_hash=parts[2] if len(parts)==3 else (parts[1] if len(parts)>1 else "")
     if not game and len(parts)==2:
         game="Free Fire"  # Compatibility with old category buttons during rollout.
@@ -398,7 +396,7 @@ async def category(call:CallbackQuery):
         await callback_answer(call, "No products in this category yet.",show_alert=True);return
     kb=product_keyboard(products)
     kb.inline_keyboard[-1]=[InlineKeyboardButton(text="🔙 Categories",callback_data=f"game:{game_hash(game)}",style="primary")]
-    await call.message.edit_text(f"🎮 <b>{html.escape(game.upper())}</b> · 📂 <b>{html.escape(name.upper())}</b>\\n\\n✨ Available Products\\n\\n💎 Premium Keys\\n⚡ Instant Delivery\\n🔒 Secure Payment\\n📞 Support\\n\\n🛒 Select a product below:",reply_markup=kb)
+    await call.message.edit_text(f"🎮 <b>{html.escape(game.upper())}</b> · 📂 <b>{html.escape(name.upper())}</b>\n\n✨ Available Products\n\n💎 Premium Keys\n⚡ Instant Delivery\n🔒 Secure Payment\n📞 Support\n\n🛒 Select a product below:",reply_markup=kb)
     await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("product:"))
@@ -485,7 +483,7 @@ def no_stock_refund_message(amount):
           "This product is currently out of stock.\n\n"
           f"Your ₹{value} has been returned to your wallet.\n"
           "Please check back later or contact admin.")
-    return text, None
+    return text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📞 Contact Admin",url="https://t.me/subro98")]])
 
 
 async def notify_referral_reward(referred_user_id):
@@ -736,8 +734,8 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         await state.set_state(AdminState.admin_input);await state.update_data(admin_action="wallet")
         msg="💰 <b>Wallet control</b>\nSend <code>USER_ID | AMOUNT</code>. Use a positive amount to credit and a negative amount to deduct."
     elif section=="products":
-        rows=[[InlineKeyboardButton(text=f"🎮 {g}",callback_data=f"ac:game:{game_hash(g)}",style="primary")] for g in GAME_NAMES]
-        rows += [[InlineKeyboardButton(text="🔎 Search categories / products",callback_data="ac:search",style="success")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin",style="primary")]] + admin_nav_rows()
+        rows=[[InlineKeyboardButton(text=f"🎮 {g}",callback_data=f"ac:game:{game_hash(g)}",style="primary")] for g in await list_games()]
+        rows += [[InlineKeyboardButton(text="➕ Add game",callback_data="ac:gameadd",style="success")],[InlineKeyboardButton(text="⚙️ Manage games",callback_data="ac:gamemanage",style="primary")],[InlineKeyboardButton(text="🔎 Search categories / products",callback_data="ac:search",style="success")],[InlineKeyboardButton(text="🔙 Admin Menu",callback_data="stk:admin",style="primary")]] + admin_nav_rows()
         await call.message.edit_text("📦 <b>PRODUCT MANAGEMENT</b>\n\n1. Choose a game\n2. Choose a category\n3. Manage existing products and plans.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call);return
     elif section=="stock":
         rows=await admin_stock_summary()
@@ -860,12 +858,42 @@ async def admin_res_toggle(call:CallbackQuery):
     await call.message.edit_text("👑 <b>RESELLER MANAGEMENT</b>\nTap a reseller to remove access, or add a user by Telegram ID.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback_answer(call, "Reseller status updated" if ok else "User not found",show_alert=True)
 
+@dp.callback_query(F.data=="ac:gameadd")
+async def ac_game_add(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    await state.set_state(AdminState.admin_input); await state.update_data(admin_action="game_create")
+    await call.message.answer("Send the new game name (1–80 characters):"); await callback_answer(call)
+
+@dp.callback_query(F.data=="ac:gamemanage")
+async def ac_game_manage(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    games=await list_games()
+    rows=[[InlineKeyboardButton(text=f"✏️ {g}",callback_data=f"ac:gameedit:{game_hash(g)}"),InlineKeyboardButton(text="🗑️",callback_data=f"ac:gameremove:{game_hash(g)}",style="danger")] for g in games]
+    rows += [[InlineKeyboardButton(text="🔙 Products",callback_data="adm:products")]]
+    await call.message.edit_text("⚙️ <b>MANAGE GAMES</b>\nEdit a game name or remove it from the customer list. Removing archives it; its products, plans, stock and order history are retained.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("ac:gameedit:"))
+async def ac_game_edit(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    token=call.data.rsplit(":",1)[1]; game=next((g for g in await list_games() if game_hash(g)==token),None)
+    if not game: await callback_answer(call,"Game not found",show_alert=True); return
+    await state.set_state(AdminState.admin_input); await state.update_data(admin_action="game_rename",game_old=game)
+    await call.message.answer(f"Send the new name for <b>{html.escape(game)}</b>:"); await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("ac:gameremove:"))
+async def ac_game_remove(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
+    token=call.data.rsplit(":",1)[1]; game=next((g for g in await list_games() if game_hash(g)==token),None)
+    if not game: await callback_answer(call,"Game not found",show_alert=True); return
+    ok=await archive_game(game); await admin_log(call.from_user.id,"GAME_ARCHIVE",game) if ok else None
+    await call.message.edit_text("✅ Game removed from the customer list. Existing catalogue and history were preserved." if ok else "❌ Game could not be removed.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ Manage games",callback_data="ac:gamemanage")],[InlineKeyboardButton(text="📦 Products",callback_data="adm:products")]])); await callback_answer(call)
+
 @dp.callback_query(F.data.startswith("ac:game:"))
 async def ac_admin_choose_game(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):
         await callback_answer(call,"Admin only",show_alert=True);return
     token=call.data.split(":",1)[1]
-    game=next((g for g in GAME_NAMES if game_hash(g)==token),None)
+    game=next((g for g in await list_games() if game_hash(g)==token),None)
     if not game:
         await callback_answer(call,"Game not found. Refresh Products.",show_alert=True);return
     await state.update_data(admin_game=game)
@@ -873,7 +901,7 @@ async def ac_admin_choose_game(call:CallbackQuery,state:FSMContext):
     rows=[[InlineKeyboardButton(text=f"📁 {c['name']} · {c['count']} products",callback_data=f"ac:category:{i}",style="primary")] for i,c in enumerate(cats)]
     rows += [[InlineKeyboardButton(text="➕ Add category",callback_data="ac:addcategory",style="primary")],
              [InlineKeyboardButton(text="🔙 Choose Game",callback_data="adm:products",style="primary")]]
-    await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\\n\\nChoose a category to manage its products.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\n\nChoose a category to manage its products.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback_answer(call)
 
 @dp.callback_query(F.data=="ac:categories")
@@ -1251,7 +1279,15 @@ async def admin_button_input(message:Message,state:FSMContext):
     if not is_admin(message.from_user.id):return
     data=await state.get_data();action=data.get("admin_action");raw=message.text.strip()
     try:
-        if action=="wallet":
+        if action=="game_create":
+            ok=await create_game(raw)
+            if ok: await admin_log(message.from_user.id,"GAME_CREATE",raw)
+            await message.answer("✅ Game created. It is now available in the shop." if ok else "❌ Invalid name or a game with that name already exists.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Products",callback_data="adm:products")]]))
+        elif action=="game_rename":
+            old=data.get("game_old",""); ok=await rename_game(old,raw)
+            if ok: await admin_log(message.from_user.id,"GAME_RENAME",f"{old} -> {raw}")
+            await message.answer("✅ Game renamed. Existing products, plans, stock and history remain linked." if ok else "❌ Game not found or that name already exists.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ Manage games",callback_data="ac:gamemanage")],[InlineKeyboardButton(text="📦 Products",callback_data="adm:products")]]))
+        elif action=="wallet":
             uid_s,amount_s=[x.strip() for x in raw.split("|",1)];amount=float(amount_s)
             if amount==0:raise ValueError
             balance=await adjust_wallet(int(uid_s),amount,message.from_user.id,"Admin button adjustment")
@@ -1472,7 +1508,7 @@ async def stock_pick_plan(call:CallbackQuery,state:FSMContext):
 @dp.callback_query(F.data=="ac:search")
 async def ac_search_start(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
-    await state.set_state(AdminState.search_catalog)
+    await state.set_state(AdminState.search_catalog, list_games, create_game, rename_game, archive_game)
     await call.message.answer("🔎 Send a category or product name to search:")
     await callback_answer(call)
 
