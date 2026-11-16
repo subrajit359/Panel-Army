@@ -1,6 +1,6 @@
 import os, secrets
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, select, func, text, or_
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, select, func, text, or_, delete, update, literal
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.engine import make_url
@@ -164,6 +164,8 @@ class Order(Base):
     key_text: Mapped[str | None] = mapped_column(Text)
     cashfree_payment_link: Mapped[str | None] = mapped_column(Text)  # retained for legacy order history
     famgateway_order_id: Mapped[str | None] = mapped_column(String(80))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    request_token: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("product_plans.id"), index=True)
@@ -195,6 +197,9 @@ async def init_db():
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'FAM'",
             "ALTER TABLE orders ALTER COLUMN payment_method SET DEFAULT 'FAM'",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS famgateway_order_id VARCHAR(80)",
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_token VARCHAR(80)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_request_token ON orders (request_token) WHERE request_token IS NOT NULL",
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_famgateway_order_id ON orders (famgateway_order_id) WHERE famgateway_order_id IS NOT NULL",
             "ALTER TABLE orders ALTER COLUMN product_id DROP NOT NULL",
             "CREATE INDEX IF NOT EXISTS ix_key_stock_plan_status_id ON key_stock (plan_id, status, id)",
@@ -315,15 +320,18 @@ async def list_products(category=None, include_empty=False):
                 })
         return output
 
-async def get_product(product_id):
-    """Fetch a customer-facing product, plan prices and available stock counts."""
+async def get_product(product_id, include_stock=False):
+    """Fetch a product and plans. Stock counts are opt-in for admin inventory screens."""
     async with Session() as s:
-        stock_count = select(func.count(KeyStock.id)).where(
-            KeyStock.plan_id == ProductPlan.id, KeyStock.status == "AVAILABLE"
-        ).correlate(ProductPlan).scalar_subquery()
+        if include_stock:
+            stock_count = select(func.count(KeyStock.id)).where(
+                KeyStock.plan_id == ProductPlan.id, KeyStock.status == "AVAILABLE"
+            ).correlate(ProductPlan).scalar_subquery()
+            stmt = select(Product, ProductPlan, stock_count.label("stock"))
+        else:
+            stmt = select(Product, ProductPlan, literal(None))
         rows = (await s.execute(
-            select(Product, ProductPlan, stock_count.label("stock"))
-            .outerjoin(ProductPlan, (ProductPlan.product_id == Product.id) & (ProductPlan.active == True))
+            stmt.outerjoin(ProductPlan, (ProductPlan.product_id == Product.id) & (ProductPlan.active == True))
             .where(Product.id == product_id, Product.active == True)
             .order_by(ProductPlan.id)
         )).all()
@@ -335,12 +343,42 @@ async def get_product(product_id):
             "price_inr": float(pl.price_inr), "price_usd": float(pl.price_usd),
             "reseller_price_inr": float(pl.reseller_price_inr),
             "reseller_price_usd": float(pl.reseller_price_usd),
-            "stock": int(stock or 0),
+            **({"stock": int(stock or 0)} if include_stock else {}),
         } for _, pl, stock in rows if pl is not None]
         return {
             "id": product.id, "name": product.name, "description": product.description,
             "category": product.category, "maintenance": bool(product.maintenance), "plans": plans,
         }
+
+
+async def get_plan(plan_id, include_stock=False):
+    async with Session() as s:
+        if include_stock:
+            stock_count = select(func.count(KeyStock.id)).where(
+                KeyStock.plan_id == ProductPlan.id, KeyStock.status == "AVAILABLE"
+            ).correlate(ProductPlan).scalar_subquery()
+            stmt = select(ProductPlan, Product, stock_count.label("stock"))
+        else:
+            stmt = select(ProductPlan, Product, literal(None))
+        row = (await s.execute(
+            stmt.join(Product, Product.id == ProductPlan.product_id)
+            .where(ProductPlan.id == plan_id, ProductPlan.active == True, Product.active == True)
+        )).first()
+        if not row:
+            return None
+        pl, product, stock = row
+        result = {
+            "id": pl.id, "product_id": pl.product_id, "product_name": product.name,
+            "category": product.category, "description": product.description, "maintenance": bool(product.maintenance),
+            "duration": pl.duration, "price_inr": float(pl.price_inr),
+            "price_usd": float(pl.price_usd),
+            "reseller_price_inr": float(pl.reseller_price_inr),
+            "reseller_price_usd": float(pl.reseller_price_usd),
+        }
+        if include_stock:
+            result["stock"] = int(stock or 0)
+        return result
+
 
 async def get_plan(plan_id):
     async with Session() as s:
@@ -383,7 +421,7 @@ async def create_order(user_id, plan_id, amount, quantity=1, payment_method="FAM
 async def get_order(order_id):
     async with Session() as s:
         o=await s.get(Order,order_id)
-        return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,"duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"cashfree_payment_link":o.cashfree_payment_link,"famgateway_order_id":o.famgateway_order_id,"created_at":o.created_at} if o else None
+        return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,"duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"cashfree_payment_link":o.cashfree_payment_link,"famgateway_order_id":o.famgateway_order_id,"created_at":o.created_at,"expires_at":o.expires_at} if o else None
 
 async def set_famgateway_order_id(order_id, famgateway_order_id):
     async with Session() as s:
@@ -391,6 +429,7 @@ async def set_famgateway_order_id(order_id, famgateway_order_id):
             o=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
             if not o: raise ValueError("Panel Army order not found")
             o.famgateway_order_id=str(famgateway_order_id)
+            o.expires_at=datetime.now(timezone.utc)+timedelta(minutes=5)
 
 async def get_order_by_famgateway_id(famgateway_order_id):
     async with Session() as s:
@@ -398,7 +437,7 @@ async def get_order_by_famgateway_id(famgateway_order_id):
         if not o:return None
         return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,
                 "duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,
-                "payment_method":o.payment_method,"famgateway_order_id":o.famgateway_order_id,"created_at":o.created_at}
+                "payment_method":o.payment_method,"famgateway_order_id":o.famgateway_order_id,"created_at":o.created_at,"expires_at":o.expires_at}
 
 async def expire_order(order_id):
     async with Session() as s:
@@ -411,19 +450,39 @@ async def set_payment_link(order_id, url):
         o=await s.get(Order,order_id)
         if o:o.cashfree_payment_link=url;await s.commit()
 
-async def pay_wallet(user_id, plan_id, quantity=1):
-    pl=await get_plan(plan_id)
-    user=await get_user(user_id)
-    if not pl or quantity < 1 or quantity > 100: raise ValueError("Invalid plan or quantity (maximum 100)")
-    if pl.get("maintenance"): raise ValueError(f"{pl['product_name']} is under maintenance")
-    price=pl["reseller_price_inr"] if user and user["is_reseller"] else pl["price_inr"]
-    amount=round(price*quantity,2)
+async def pay_wallet(user_id, plan_id, quantity=1, idempotency_token=None):
+    if quantity < 1 or quantity > 100:
+        raise ValueError("Invalid quantity (maximum 100)")
     order_id="PA-"+secrets.token_hex(8).upper()
     async with Session() as s:
         async with s.begin():
             u=await s.scalar(select(User).where(User.user_id==user_id).with_for_update())
-            if not u or float(u.wallet_balance or 0)<amount: raise ValueError("Insufficient wallet balance")
-            o=Order(order_id=order_id,user_id=user_id,product_id=pl["product_id"],plan_id=plan_id,duration=pl["duration"],quantity=quantity,amount_inr=amount,status="PENDING",payment_method="WALLET")
+            if not u:
+                raise ValueError("Customer not found")
+            if idempotency_token:
+                previous = await s.scalar(select(Order).where(Order.request_token == str(idempotency_token)))
+                if previous:
+                    return {"duplicate": True, "order_id": previous.order_id, "status": previous.status}
+            row=(await s.execute(
+                select(ProductPlan, Product)
+                .join(Product, Product.id == ProductPlan.product_id)
+                .where(ProductPlan.id==plan_id, ProductPlan.active==True, Product.active==True)
+                .with_for_update(of=ProductPlan)
+            )).first()
+            if not row:
+                raise ValueError("Invalid plan")
+            pl, product = row
+            if product.maintenance:
+                raise ValueError(f"{product.name} is under maintenance")
+            unit_price=float(pl.reseller_price_inr if u.is_reseller else pl.price_inr)
+            amount=round(unit_price*quantity,2)
+            if amount <= 0:
+                raise ValueError("Invalid plan price")
+            if float(u.wallet_balance or 0)<amount:
+                raise ValueError("Insufficient wallet balance")
+            o=Order(order_id=order_id,user_id=user_id,product_id=pl.product_id,plan_id=plan_id,
+                    duration=pl.duration,quantity=quantity,amount_inr=amount,status="PENDING",payment_method="WALLET",
+                    request_token=str(idempotency_token)[:80] if idempotency_token else None)
             s.add(o)
             u.wallet_balance=float(u.wallet_balance or 0)-amount
             s.add(WalletTransaction(user_id=user_id,amount=amount,kind="DEBIT",note=f"Purchase {order_id}",admin_id=None,reference_id=f"ORDER_DEBIT:{order_id}"))
@@ -435,7 +494,9 @@ async def pay_wallet(user_id, plan_id, quantity=1):
                 no_stock=True
             else:
                 no_stock=False
-    return {"order_id":order_id,"amount_inr":amount,"key_text":result.get("key_text") if result else None,"product_name":pl["product_name"],"duration":pl["duration"],"quantity":quantity,"no_stock":no_stock}
+    return {"order_id":order_id,"amount_inr":amount,"key_text":result.get("key_text") if result else None,
+            "product_name":product.name,"duration":pl.duration,"quantity":quantity,"no_stock":no_stock}
+
 
 async def _fulfill_locked(s,o):
     keys=(await s.scalars(select(KeyStock).where(KeyStock.plan_id==o.plan_id,KeyStock.status=="AVAILABLE").order_by(KeyStock.id).with_for_update(skip_locked=True).limit(o.quantity))).all()
@@ -615,6 +676,67 @@ async def update_reseller_price_by_duration(product_id, duration, reseller_price
             plan.reseller_price_inr=reseller_price
             plan.reseller_price_usd=0
             return {"id":plan.id,"duration":plan.duration}
+
+
+async def bulk_customer_plan_prices(product_id, entries):
+    """Atomically create/update customer prices for multiple durations."""
+    cleaned=[]; seen=set()
+    for duration, price in entries:
+        duration=str(duration or "").strip(); price=float(price)
+        if not duration or len(duration)>80 or not 0<=price<=500000:
+            raise ValueError("Invalid duration or customer price")
+        key=duration.casefold()
+        if key in seen: raise ValueError(f"Duplicate duration in input: {duration}")
+        seen.add(key); cleaned.append((duration,price))
+    if not cleaned: raise ValueError("No plan lines supplied")
+    results=[]
+    async with Session() as s:
+        async with s.begin():
+            await s.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": int(product_id)})
+            product=await s.get(Product,product_id)
+            if not product: raise ValueError("Product not found")
+            existing=(await s.scalars(select(ProductPlan).where(ProductPlan.product_id==product_id).with_for_update())).all()
+            by_duration={p.duration.strip().casefold():p for p in existing}
+            had_plans=bool(existing)
+            for duration,price in cleaned:
+                plan=by_duration.get(duration.casefold())
+                if plan:
+                    plan.price_inr=price; plan.price_usd=0
+                    results.append({"id":plan.id,"duration":plan.duration,"created":False})
+                else:
+                    plan=ProductPlan(product_id=product_id,duration=duration,price_inr=price,price_usd=0,
+                                     reseller_price_inr=price,reseller_price_usd=0)
+                    s.add(plan); await s.flush()
+                    results.append({"id":plan.id,"duration":plan.duration,"created":True})
+                    if not had_plans:
+                        await s.execute(text("UPDATE key_stock SET plan_id=:plan WHERE product_id=:product AND plan_id IS NULL"),
+                                         {"plan":plan.id,"product":product_id})
+                    had_plans=True
+    return results
+
+
+async def bulk_reseller_plan_prices(product_id, entries):
+    """Atomically update reseller prices for existing durations only."""
+    cleaned=[]; seen=set()
+    for duration, price in entries:
+        duration=str(duration or "").strip(); price=float(price)
+        if not duration or len(duration)>80 or not 0<=price<=500000:
+            raise ValueError("Invalid duration or reseller price")
+        key=duration.casefold()
+        if key in seen: raise ValueError(f"Duplicate duration in input: {duration}")
+        seen.add(key); cleaned.append((duration,price))
+    if not cleaned: raise ValueError("No plan lines supplied")
+    async with Session() as s:
+        async with s.begin():
+            await s.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": int(product_id)})
+            plans=(await s.scalars(select(ProductPlan).where(ProductPlan.product_id==product_id,ProductPlan.active==True).with_for_update())).all()
+            by_duration={p.duration.strip().casefold():p for p in plans}
+            missing=[d for d,_ in cleaned if d.casefold() not in by_duration]
+            if missing: raise ValueError("Customer plan not found for: "+", ".join(missing)+". Add customer plans first.")
+            for duration,price in cleaned:
+                plan=by_duration[duration.casefold()]
+                plan.reseller_price_inr=price; plan.reseller_price_usd=0
+    return [{"duration":d,"price":p} for d,p in cleaned]
 
 
 async def add_plans_bulk(product_id, plans):
@@ -1029,28 +1151,40 @@ async def delete_coupon(code):
         await s.delete(c);await s.commit();return True
 
 async def delete_category_admin(name):
+    """Delete a category and its products/plans/stock; preserve order records detached from catalogue."""
     async with Session() as s:
-        result=await s.execute(select(Product).where(Product.category==name))
-        rows=result.scalars().all()
-        for product in rows: product.category="Other Products"
-        category=await s.get(ProductCategory,name)
-        if category: await s.delete(category)
-        await s.commit();return len(rows) + (1 if category else 0)
+        async with s.begin():
+            category=await s.get(ProductCategory,name)
+            normalized_name = str(name or "").strip().casefold()
+            products=(await s.scalars(
+                select(Product).where(func.lower(func.trim(Product.category)) == normalized_name).with_for_update()
+            )).all()
+            product_ids=[p.id for p in products]
+            if not category and not product_ids:
+                return 0
+            if product_ids:
+                plan_ids=list((await s.scalars(select(ProductPlan.id).where(ProductPlan.product_id.in_(product_ids)))).all())
+                await s.execute(update(Order).where(or_(Order.product_id.in_(product_ids), Order.plan_id.in_(plan_ids or [-1]))).values(product_id=None,plan_id=None))
+                await s.execute(delete(KeyStock).where(KeyStock.product_id.in_(product_ids)))
+                await s.execute(delete(ProductPlan).where(ProductPlan.product_id.in_(product_ids)))
+                await s.execute(delete(Product).where(Product.id.in_(product_ids)))
+            if category:
+                await s.delete(category)
+            return len(product_ids)+(1 if category else 0)
 
 
 async def delete_product_admin(product_id):
-    """Hard-delete only products with no historical orders or key records; otherwise archive safely."""
+    """Delete product, plans and stock while retaining financial/order history detached from the catalogue."""
     async with Session() as s:
-        p=await s.get(Product,product_id)
-        if not p:return "NOT_FOUND"
-        order_count=int(await s.scalar(select(func.count(Order.order_id)).where(Order.product_id==product_id)) or 0)
-        key_count=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.product_id==product_id)) or 0)
-        if order_count or key_count:
-            p.active=False
-            await s.execute(text("UPDATE product_plans SET active=FALSE WHERE product_id=:pid"),{"pid":product_id})
-            await s.commit();return "ARCHIVED"
-        await s.execute(text("DELETE FROM product_plans WHERE product_id=:pid"),{"pid":product_id})
-        await s.delete(p);await s.commit();return "DELETED"
+        async with s.begin():
+            p=await s.get(Product,product_id,with_for_update=True)
+            if not p:return "NOT_FOUND"
+            plan_ids=list((await s.scalars(select(ProductPlan.id).where(ProductPlan.product_id==product_id))).all())
+            await s.execute(update(Order).where(or_(Order.product_id==product_id, Order.plan_id.in_(plan_ids or [-1]))).values(product_id=None,plan_id=None))
+            await s.execute(delete(KeyStock).where(KeyStock.product_id==product_id))
+            await s.execute(delete(ProductPlan).where(ProductPlan.product_id==product_id))
+            await s.delete(p)
+            return "DELETED"
 
 
 async def search_catalog(term, limit=30):
@@ -1077,9 +1211,10 @@ async def stock_order_history(key_id):
         order=await s.get(Order,row.order_id) if row.order_id else None
         return {'id':row.id,'status':row.status,'order_id':row.order_id,'key_text':row.key_text,'user_id':order.user_id if order else None,'amount_inr':float(order.amount_inr) if order else None,'created_at':order.created_at if order else None}
 
-async def payment_reconciliation(limit=100):
+async def payment_reconciliation(limit=100, newest_first=False):
     async with Session() as s:
-        rows=(await s.scalars(select(Order).where(Order.status.in_(['PENDING','EXPIRED','PAID_NO_STOCK'])).order_by(Order.created_at).limit(max(1,min(int(limit),500)) ))).all()
+        ordering = Order.created_at.desc() if newest_first else Order.created_at
+        rows=(await s.scalars(select(Order).where(Order.status.in_(['PENDING','EXPIRED','PAID_NO_STOCK'])).order_by(ordering).limit(max(1,min(int(limit),500)) ))).all()
         return [{'order_id':o.order_id,'user_id':o.user_id,'amount_inr':float(o.amount_inr),'status':o.status,'payment_method':o.payment_method,'created_at':o.created_at} for o in rows]
 
 async def reseller_performance(user_id):
