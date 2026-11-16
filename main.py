@@ -10,15 +10,15 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram import BaseMiddleware
-from config import BOT_TOKEN, ADMIN_IDS, PUBLIC_BASE_URL
+from config import BOT_TOKEN, ADMIN_IDS, PUBLIC_BASE_URL, FAMGATEWAY_API_KEY
 from db import (init_db, close_db, is_user_banned, get_or_create_user, list_categories, list_products, get_product, get_plan,
-                create_order, get_order, fulfill_paid_order, credit_wallet_for_no_stock, add_product, add_plan, add_stock, create_topup_order, fulfill_wallet_topup,
+                create_order, get_order, fulfill_paid_order, credit_wallet_for_no_stock, add_product, add_plan, add_stock, create_topup_order, fulfill_wallet_topup, set_famgateway_order_id, get_order_by_famgateway_id,
                 list_orders, get_user, pay_wallet, set_payment_link, expire_order, dashboard_stats, search_users,
                 admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
                 set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
                 set_bot_setting, get_bot_settings, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats, list_resellers, list_coupons, update_coupon, delete_coupon, set_product_maintenance, delete_category_admin, delete_product_admin,
                 attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, health_check, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, rename_category_admin, category_products_admin, create_category_admin, add_plans_bulk, payment_reconciliation, search_catalog)
-from cashfree import create_payment_link, fetch_payment_link, payment_link_is_paid, fetch_order_payments, verify_webhook_signature, close_cashfree_session
+from famgateway import create_qr as fam_create_qr, verify_payment as fam_verify_payment, close_famgateway_session
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger("panel_army")
@@ -50,17 +50,57 @@ class AdminState(StatesGroup):
 
 def is_admin(user_id:int)->bool:return user_id in ADMIN_IDS
 
-async def cashfree_payment_confirmed(order):
-    """Verify the provider-side status and exact amount for both new links and legacy QR orders."""
-    saved_link = str(order.get("cashfree_payment_link") or "")
-    if saved_link.startswith("https://"):
-        link = await fetch_payment_link(order["order_id"])
-        return payment_link_is_paid(link, order["amount_inr"], order["order_id"]), link.get("link_status", "UNKNOWN"), float(link.get("link_amount_paid") or 0)
-    # Backward compatibility for orders created before the Payment Links update.
-    remote = await fetch_order_payments(order["order_id"])
-    payments = remote if isinstance(remote, list) else remote.get("payments", []) if isinstance(remote, dict) else []
-    successful = next((x for x in payments if x.get("payment_status") == "SUCCESS" and abs(float(x.get("payment_amount") or 0) - order["amount_inr"]) < 0.005), None)
-    return bool(successful), successful.get("payment_status") if successful else (payments[-1].get("payment_status") if payments else "NO PAYMENT ATTEMPT"), float(successful.get("payment_amount") or 0) if successful else 0.0
+async def famgateway_payment_confirmed(order):
+    fam_order_id = str(order.get("famgateway_order_id") or "")
+    if not fam_order_id:
+        return False, "MISSING_FAMGATEWAY_ORDER_ID", 0.0
+    return await fam_verify_payment(fam_order_id, order["amount_inr"])
+
+
+async def deliver_famgateway_order(order):
+    """Deliver or credit a server-verified FamGateway payment exactly once."""
+    order_id = order["order_id"]
+    if order.get("payment_method") in ("TOPUP", "FAM_TOPUP"):
+        credited = await fulfill_wallet_topup(order_id)
+        if credited and credited.get("credited"):
+            await bot.send_message(order["user_id"], f"✅ <b>Wallet Top-up Successful!</b>\n\n💰 ₹{credited['amount']:.2f} has been added to your wallet.")
+        return
+    if order.get("status") == "PAID_NO_STOCK":
+        refund = await credit_wallet_for_no_stock(order_id)
+        if refund and refund.get("credited"):
+            text, kb = no_stock_refund_message(refund["amount"])
+            await bot.send_message(order["user_id"], text, reply_markup=kb)
+        return
+    result = await fulfill_paid_order(order_id)
+    if result and result.get("key_text"):
+        plan = await get_plan(order["plan_id"]) if order.get("plan_id") else None
+        await bot.send_message(order["user_id"], success_message(plan["product_name"] if plan else "Product", order["duration"], order["quantity"], result["key_text"]))
+        await notify_referral_reward(order["user_id"])
+    elif result and not result.get("key_text") and not result.get("already_paid"):
+        refund = await credit_wallet_for_no_stock(order_id)
+        if refund and refund.get("credited"):
+            text, kb = no_stock_refund_message(refund["amount"])
+            await bot.send_message(order["user_id"], text, reply_markup=kb)
+
+
+async def monitor_famgateway_order(order_id: str):
+    """Non-blocking 4-second server-side polling; webhook remains the fast path."""
+    for _ in range(150):  # up to 10 minutes; provider itself decides expiry
+        await asyncio.sleep(4)
+        try:
+            order = await get_order(order_id)
+            if not order or order.get("status") not in ("PENDING", "EXPIRED", "PAID_NO_STOCK"):
+                return
+            paid, provider_status, _ = await famgateway_payment_confirmed(order)
+            if paid:
+                await deliver_famgateway_order(order)
+                return
+            if provider_status == "EXPIRED":
+                await expire_order(order_id)
+                return
+        except Exception:
+            log.exception("FamGateway background status check failed for %s", order_id)
+
 
 def admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -375,39 +415,42 @@ async def wallet_pay(call:CallbackQuery):
 
 @dp.callback_query(F.data.startswith("upi:"))
 async def upi_begin(call:CallbackQuery,state:FSMContext):
-    # Stop Telegram's callback spinner immediately; Cashfree may take a few seconds.
-    await callback_answer(call, "Request received")
-    progress = await call.message.answer("⏳ Connecting to Cashfree…\nPlease wait while your payment link is generated.")
+    await callback_answer(call, "Creating your UPI QR…")
+    progress = await call.message.answer("⏳ Connecting to FamGateway…\nPlease wait while your payment QR is generated.")
     parts=call.data.split(":");plan_id=int(parts[1]);quantity=int(parts[2]) if len(parts)>2 else 1
     if quantity < 1 or quantity > 100:
         await progress.edit_text("❌ Quantity must be between 1 and 100.");return
     p=await get_plan(plan_id)
     if not p:
-        try: await progress.edit_text("❌ This plan is unavailable. Please choose another plan.")
-        except Exception: pass
-        return
+        await progress.edit_text("❌ This plan is unavailable. Please choose another plan.");return
     if p.get("maintenance"):
-        await progress.edit_text(f"🛠️ {html.escape(p['product_name'])} is under maintenance. Please check back later."); return
+        await progress.edit_text(f"🛠️ {html.escape(p['product_name'])} is under maintenance. Please check back later.");return
     user=await get_user(call.from_user.id)
     if not user or not user.get("phone"):
-        await call.message.answer("Please restart the bot and share your phone number first.");return
+        await progress.edit_text("Please restart the bot and share your phone number first.");return
     unit=p['reseller_price_inr'] if user and user['is_reseller'] else p['price_inr'];amount=round(unit*quantity,2)
-    order=await create_order(call.from_user.id,plan_id,amount,quantity,"CASHFREE")
+    order=await create_order(call.from_user.id,plan_id,amount,quantity,"FAM")
     try:
-        payment_title=f"Payment for {p['product_name']} ({p['duration']})"
-        payment=await create_payment_link(order['order_id'],amount,call.from_user.id,call.from_user.full_name or f"user{call.from_user.id}",user['phone'],payment_title)
-        await set_payment_link(order['order_id'],payment['link_url'])
-        caption=(f"🛒 <b>PAYMENT LINK</b>\n\n📦 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: {quantity} key(s)\n💰 Amount: <b>₹{amount:.2f}</b>\n🆔 Order ID: <code>{order['order_id']}</code>\n\n🔐 Complete your payment securely using the button below.\n⚡ Payment is verified automatically; your key will be delivered here after confirmation.\n⏰ This payment link expires in 10 minutes.")
-        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Pay Now · Cashfree",url=payment['link_url'],style="success")],[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}",style="primary")]])
+        note=f"Panel Army {order['order_id']} · {p['product_name']} {p['duration']}"
+        payment=await fam_create_qr(amount,call.from_user.full_name or f"user{call.from_user.id}",user['phone'],note)
+        await set_famgateway_order_id(order['order_id'],payment['order_id'])
+        caption=(f"🛒 <b>PANEL ARMY · UPI PAYMENT</b>\n\n📦 Product: {html.escape(p['product_name'])} ({html.escape(p['duration'])})\n📦 Quantity: {quantity} key(s)\n💰 Amount: <b>₹{payment['amount']:.2f}</b>\n🆔 Order ID: <code>{order['order_id']}</code>\n\n📲 Scan this QR using any UPI app.\n⚡ Payment is verified automatically; your key will be delivered here after FamGateway confirms payment.\n⏳ Please complete payment before the QR expires.")
+        rows=[]
+        if payment.get("upi_intent"):
+            rows.append([InlineKeyboardButton(text="📲 Pay in UPI App",url=payment["upi_intent"],style="success")])
+        if payment.get("checkout_url"):
+            rows.append([InlineKeyboardButton(text="🌐 Open Payment Page",url=payment["checkout_url"],style="primary")])
+        rows.append([InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}",style="primary")])
         try: await progress.delete()
         except Exception: pass
-        await call.message.answer(caption,reply_markup=kb)
+        await call.message.answer_photo(photo=payment['qr_url'],caption=caption,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        asyncio.create_task(monitor_famgateway_order(order['order_id']))
     except Exception:
-        log.exception("Cashfree Payment Link creation failed")
+        log.exception("FamGateway QR creation failed")
         try: await progress.edit_text("❌ Could not generate the UPI QR. Please try again.")
         except Exception: pass
         await expire_order(order['order_id'])
-        await call.message.answer("❌ Cashfree could not create the UPI QR for this order. No payment was taken. Please try again or contact support.")
+        await call.message.answer("❌ FamGateway could not create a payment QR for this order. No payment was taken. Please try again or contact support.")
 
 @dp.callback_query(F.data.startswith("check:"))
 async def check_payment(call:CallbackQuery):
@@ -416,37 +459,19 @@ async def check_payment(call:CallbackQuery):
     if order['status']=="PAID":await callback_answer(call, "Payment already completed.");return
     if order['status']=="REFUNDED":
         await callback_answer(call, "Payment was refunded to your wallet.",show_alert=True);return
-    age=datetime.now(timezone.utc)-order['created_at'].astimezone(timezone.utc)
     try:
-        is_paid, provider_status, paid_amount = await cashfree_payment_confirmed(order)
+        is_paid, provider_status, paid_amount = await famgateway_payment_confirmed(order)
         if is_paid:
-            if order.get("payment_method")=="TOPUP":
-                credited=await fulfill_wallet_topup(order_id)
-                if credited and credited.get("credited"):
-                    await call.message.answer(f"✅ <b>Wallet Top-up Successful!</b>\n\n💰 ₹{credited['amount']:.2f} has been added to your wallet.")
-                else: await call.message.answer("This wallet top-up has already been credited.")
-                await callback_answer(call, "Payment verified!");return
-            result=await fulfill_paid_order(order_id) if order['status'] in ("PENDING","EXPIRED") else {"key_text":None} if order['status']=="PAID_NO_STOCK" else None
-            if result and result.get('key_text'):
-                plan=await get_plan(order['plan_id']) if order.get('plan_id') else None
-                game=plan['product_name'] if plan else "Product"
-                await call.message.answer(success_message(game,order['duration'],order['quantity'],result['key_text']))
-                await notify_referral_reward(call.from_user.id)
-            elif result and not result.get('key_text'):
-                refund=await credit_wallet_for_no_stock(order_id)
-                if refund and refund.get('credited'):
-                    text,kb=no_stock_refund_message(refund['amount'])
-                    await call.message.answer(text,reply_markup=kb)
-                else:
-                    await call.message.answer("Your payment was already refunded to your wallet.")
+            await deliver_famgateway_order(order)
             await callback_answer(call, "Payment verified!");return
-        if age>timedelta(minutes=10):
+        if provider_status == "EXPIRED":
             await expire_order(order_id)
-            await call.message.answer(f"⌛ <b>Payment Timed Out!</b>\nThe payment for this order has expired. Please try again if you still want to purchase.")
-            await callback_answer(call, "Payment window expired.",show_alert=True);return
-        await callback_answer(call, "Payment not yet confirmed. Try again in a moment.",show_alert=True)
+            await call.message.answer("⌛ <b>QR Expired</b>\nThis payment QR has expired. Please create a new order.")
+            await callback_answer(call, "QR expired.",show_alert=True);return
+        await callback_answer(call, "Payment not yet confirmed. Try again in a few seconds.",show_alert=True)
     except Exception:
-        log.exception("Payment status check failed");await callback_answer(call, "Could not check payment status.",show_alert=True)
+        log.exception("FamGateway payment status check failed")
+        await callback_answer(call, "Could not check payment status. Please try again.",show_alert=True)
 
 @dp.callback_query(F.data=="orders")
 async def orders_cb(call:CallbackQuery):
@@ -488,23 +513,28 @@ async def topup_custom_received(message:Message,state:FSMContext):
     await show_topup_method(message,amount)
 
 async def show_topup_method(target,amount):
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🇮🇳 UPI via Cashfree (INR)",callback_data=f"topuppay:{amount:.2f}", style="success")],[InlineKeyboardButton(text="🔙 Back",callback_data="balance", style="primary")]])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🇮🇳 UPI via FamGateway (INR)",callback_data=f"topuppay:{amount:.2f}", style="success")],[InlineKeyboardButton(text="🔙 Back",callback_data="balance", style="primary")]])
     await target.answer(f"💰 Deposit amount: <b>₹{amount:.2f}</b>\n\nSelect your payment method:",reply_markup=kb)
 
 async def start_topup_payment(message:Message,amount:float,user_id=None,customer_name=None):
     user_id=user_id or message.from_user.id;customer_name=customer_name or message.from_user.full_name or "Customer"
     u=await get_user(user_id)
     if not u or not u.get('phone'):await message.answer("Please verify your phone number with /start before adding balance.");return
-    order=await create_topup_order(user_id,amount)
+    order=await create_topup_order(user_id,amount,"FAM_TOPUP")
     try:
-        title=f"Panel Army Wallet Top-up ₹{amount:.2f}"
-        payment=await create_payment_link(order['order_id'],amount,user_id,customer_name,u['phone'],title)
-        await set_payment_link(order['order_id'],payment['link_url'])
-        caption=f"💰 <b>WALLET TOP-UP PAYMENT</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n💵 Amount: <b>₹{amount:.2f}</b>\n\nComplete payment using the secure Cashfree link below. Your wallet will be credited automatically after server-side confirmation.\n⏰ Link expires in 10 minutes."
-        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Pay Now · Cashfree",url=payment['link_url'],style="success")],[InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}",style="primary")]])
-        await message.answer(caption,reply_markup=kb)
+        payment=await fam_create_qr(amount,customer_name,u['phone'],f"Panel Army wallet top-up {order['order_id']}")
+        await set_famgateway_order_id(order['order_id'],payment['order_id'])
+        caption=f"💰 <b>WALLET TOP-UP · UPI PAYMENT</b>\n\n🧾 Order: <code>{order['order_id']}</code>\n💵 Amount: <b>₹{payment['amount']:.2f}</b>\n\n📲 Scan this QR using any UPI app. Your wallet will be credited automatically after FamGateway confirms payment.\n⏳ Please complete payment before the QR expires."
+        rows=[]
+        if payment.get("upi_intent"):rows.append([InlineKeyboardButton(text="📲 Pay in UPI App",url=payment["upi_intent"],style="success")])
+        if payment.get("checkout_url"):rows.append([InlineKeyboardButton(text="🌐 Open Payment Page",url=payment["checkout_url"],style="primary")])
+        rows.append([InlineKeyboardButton(text="🔎 Check Payment Status",callback_data=f"check:{order['order_id']}",style="primary")])
+        await message.answer_photo(photo=payment['qr_url'],caption=caption,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        asyncio.create_task(monitor_famgateway_order(order['order_id']))
     except Exception:
-        log.exception("Wallet top-up Payment Link creation failed");await expire_order(order['order_id']);await message.answer("Cashfree could not create the QR. No payment was taken. Please try again.")
+        log.exception("FamGateway wallet top-up QR creation failed")
+        await expire_order(order['order_id'])
+        await message.answer("FamGateway could not create the QR. No payment was taken. Please try again.")
 
 @dp.callback_query(F.data.startswith("topup:"))
 async def topup_fixed(call:CallbackQuery):
@@ -516,7 +546,7 @@ async def topup_fixed(call:CallbackQuery):
 @dp.callback_query(F.data.startswith("topuppay:"))
 async def topup_pay_method(call:CallbackQuery):
     amount=float(call.data.split(":",1)[1])
-    await callback_answer(call, "Creating payment link…")
+    await callback_answer(call, "Creating UPI QR…")
     await start_topup_payment(call.message,amount,call.from_user.id,call.from_user.full_name)
 
 @dp.callback_query(F.data=="referral")
@@ -1529,12 +1559,13 @@ async def admin_payment_check(message:Message):
     if not order_id:await message.answer("Usage: /paymentcheck ORDER_ID");return
     order=await get_order(order_id)
     if not order:await message.answer("Order not found.");return
-    if order["payment_method"] not in ("CASHFREE", "TOPUP"):await message.answer(f"{order_id}: {order['status']} (wallet payment)");return
+    if order.get("payment_method") not in ("FAM", "FAM_TOPUP"):
+        await message.answer(f"{order_id}: {order['status']} (not a FamGateway order)");return
     try:
-        is_paid,status,paid=await cashfree_payment_confirmed(order)
-        await message.answer(f"🧾 <b>{order_id}</b>\nLocal status: {order['status']}\nCashfree status: {html.escape(str(status))}\nVerified paid: {'YES' if is_paid else 'NO'}\nPaid amount: ₹{paid:.2f}\nOrder amount: ₹{order['amount_inr']:.2f}")
+        is_paid,status,paid=await famgateway_payment_confirmed(order)
+        await message.answer(f"🧾 <b>{order_id}</b>\nLocal status: {order['status']}\nFamGateway status: {html.escape(str(status))}\nVerified paid: {'YES' if is_paid else 'NO'}\nPaid amount: ₹{paid:.2f}\nOrder amount: ₹{order['amount_inr']:.2f}")
     except Exception:
-        log.exception("Admin Cashfree status lookup failed");await message.answer("Could not fetch status from Cashfree.")
+        log.exception("Admin FamGateway status lookup failed");await message.answer("Could not fetch status from FamGateway.")
 
 @dp.message(Command("refundrecord"))
 async def admin_refund_record(message:Message):
@@ -1559,7 +1590,7 @@ async def broadcast_resellers_start(message:Message,state:FSMContext):
 
 async def run_webhook_server():
     from aiohttp import web
-    import json
+    import json, hmac
     async def health(request):
         try:
             await health_check()
@@ -1567,46 +1598,50 @@ async def run_webhook_server():
         except Exception:
             log.exception("Health check failed")
             return web.json_response({"status":"degraded","database":"unavailable"},status=503)
-    async def webhook(request):
-        raw=await request.read();timestamp=request.headers.get("x-webhook-timestamp","");signature=request.headers.get("x-webhook-signature","")
-        if not verify_webhook_signature(timestamp,raw,signature):return web.Response(status=401,text="Invalid signature")
+
+    async def famgateway_webhook(request):
+        raw=await request.read()
+        signature=request.headers.get("x-famgateway-signature", "")
+        expected=hmac.new(FAMGATEWAY_API_KEY.encode("utf-8"),raw,hashlib.sha256).hexdigest()
+        if not signature or not hmac.compare_digest(expected,signature):
+            return web.Response(status=401,text="Invalid FamGateway signature")
         try:
-            payload=json.loads(raw);data=payload.get("data",{}) or {};order_data=data.get("order",{}) or {}
-            link_data=data.get("link",{}) or data.get("payment_link",{}) or {}
-            order_id=(data.get("link_id") or link_data.get("link_id") or data.get("order_id") or order_data.get("order_id") or payload.get("order_id"))
-            if order_id:
-                order=await get_order(order_id)
-                if order and order['status'] in ("PENDING","EXPIRED","PAID_NO_STOCK"):
-                    is_paid,provider_status,paid_amount=await cashfree_payment_confirmed(order)
-                    if is_paid:
-                        if order.get("payment_method")=="TOPUP":
-                            credited=await fulfill_wallet_topup(order_id)
-                            if credited and credited.get("credited"):
-                                await bot.send_message(order['user_id'],f"✅ <b>Wallet Top-up Successful!</b>\n\n💰 ₹{credited['amount']:.2f} has been added to your wallet.")
-                            return web.Response(text="OK")
-                        result=await fulfill_paid_order(order_id) if order['status'] in ("PENDING","EXPIRED") else {"key_text":None}
-                        if result and result.get("key_text"):
-                            plan=await get_plan(order['plan_id']) if order.get('plan_id') else None
-                            await bot.send_message(order['user_id'],success_message(plan['product_name'] if plan else "Product",order['duration'],order['quantity'],result['key_text']))
-                            await notify_referral_reward(order['user_id'])
-                        elif result and not result.get("key_text"):
-                            refund=await credit_wallet_for_no_stock(order_id)
-                            if refund and refund.get("credited"):
-                                text,kb=no_stock_refund_message(refund['amount'])
-                                await bot.send_message(order['user_id'],text,reply_markup=kb)
-                    elif order['status']=="PENDING" and datetime.now(timezone.utc)-order['created_at'].astimezone(timezone.utc)>timedelta(minutes=10):
-                        await expire_order(order_id)
-        except Exception:log.exception("Webhook processing failed");return web.Response(status=500,text="Webhook processing error")
+            payload=json.loads(raw)
+            if not isinstance(payload,dict):return web.Response(status=400,text="Invalid payload")
+            if str(payload.get("event") or "").lower() not in ("payment.success", "") and str(payload.get("status") or "").lower() != "success":
+                return web.Response(text="Ignored")
+            fam_order_id=str(payload.get("order_id") or "")
+            if not fam_order_id:return web.Response(status=400,text="Missing order_id")
+            order=await get_order_by_famgateway_id(fam_order_id)
+            if not order:
+                log.warning("FamGateway webhook for unknown order %s",fam_order_id)
+                return web.Response(text="Unknown order")
+            # Never trust webhook payload alone: perform authoritative server-to-server verification.
+            is_paid,status,paid_amount=await famgateway_payment_confirmed(order)
+            try:webhook_amount=round(float(payload.get("amount") or payload.get("payable_amount") or 0),2)
+            except (TypeError,ValueError):webhook_amount=0.0
+            if is_paid and abs(webhook_amount-order["amount_inr"])<0.005 and abs(paid_amount-order["amount_inr"])<0.005:
+                await deliver_famgateway_order(order)
+            elif status=="EXPIRED":
+                await expire_order(order["order_id"])
+        except Exception:
+            log.exception("FamGateway webhook processing failed")
+            return web.Response(status=500,text="Webhook processing error")
         return web.Response(text="OK")
-    app=web.Application(client_max_size=1024 * 1024);app.router.add_get("/health",health);app.router.add_post("/cashfree/webhook",webhook)
-    runner=web.AppRunner(app);await runner.setup();port=int(os.getenv("PORT","8080"));site=web.TCPSite(runner,"0.0.0.0",port);await site.start();log.info("Webhook listening on port %s",port);return runner
+
+    app=web.Application(client_max_size=1024*1024)
+    app.router.add_get("/health",health)
+    app.router.add_post("/famgateway/webhook",famgateway_webhook)
+    runner=web.AppRunner(app);await runner.setup();port=int(os.getenv("PORT","8080"));site=web.TCPSite(runner,"0.0.0.0",port);await site.start()
+    log.info("Webhook listening on port %s",port)
+    return runner
 
 async def main():
     await init_db();await bot.set_my_commands([BotCommand(command="start",description="Open Shop Menu")]);runner=await run_webhook_server()
     try:await dp.start_polling(bot)
     finally:
         await runner.cleanup()
-        await close_cashfree_session()
+        await close_famgateway_session()
         await close_db()
         await bot.session.close()
 

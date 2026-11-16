@@ -162,13 +162,14 @@ class Order(Base):
     amount_inr: Mapped[float] = mapped_column(Numeric(10,2))
     status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
     key_text: Mapped[str | None] = mapped_column(Text)
-    cashfree_payment_link: Mapped[str | None] = mapped_column(Text)
+    cashfree_payment_link: Mapped[str | None] = mapped_column(Text)  # retained for legacy order history
+    famgateway_order_id: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("product_plans.id"), index=True)
     duration: Mapped[str] = mapped_column(String(80), default="1 Day")
     quantity: Mapped[int] = mapped_column(Integer, default=1)
-    payment_method: Mapped[str] = mapped_column(String(20), default="CASHFREE")
+    payment_method: Mapped[str] = mapped_column(String(20), default="FAM")
 
 async def init_db():
     async with engine.begin() as conn:
@@ -191,7 +192,10 @@ async def init_db():
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS duration VARCHAR(80) NOT NULL DEFAULT '1 Day'",
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER NOT NULL DEFAULT 1",
-            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'CASHFREE'",
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'FAM'",
+            "ALTER TABLE orders ALTER COLUMN payment_method SET DEFAULT 'FAM'",
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS famgateway_order_id VARCHAR(80)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_famgateway_order_id ON orders (famgateway_order_id) WHERE famgateway_order_id IS NOT NULL",
             "ALTER TABLE orders ALTER COLUMN product_id DROP NOT NULL",
             "CREATE INDEX IF NOT EXISTS ix_key_stock_plan_status_id ON key_stock (plan_id, status, id)",
             "CREATE INDEX IF NOT EXISTS ix_orders_user_created ON orders (user_id, created_at DESC)",
@@ -361,7 +365,7 @@ async def get_plan(plan_id):
             "reseller_price_usd": float(pl.reseller_price_usd), "stock": int(stock or 0),
         }
 
-async def create_order(user_id, plan_id, amount, quantity=1, payment_method="CASHFREE"):
+async def create_order(user_id, plan_id, amount, quantity=1, payment_method="FAM"):
     pl=await get_plan(plan_id)
     user=await get_user(user_id)
     if not pl or not user or quantity < 1 or quantity > 100: raise ValueError("Invalid plan, customer or quantity (maximum 100)")
@@ -380,7 +384,22 @@ async def create_order(user_id, plan_id, amount, quantity=1, payment_method="CAS
 async def get_order(order_id):
     async with Session() as s:
         o=await s.get(Order,order_id)
-        return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,"duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"cashfree_payment_link":o.cashfree_payment_link,"created_at":o.created_at} if o else None
+        return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,"duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"cashfree_payment_link":o.cashfree_payment_link,"famgateway_order_id":o.famgateway_order_id,"created_at":o.created_at} if o else None
+
+async def set_famgateway_order_id(order_id, famgateway_order_id):
+    async with Session() as s:
+        async with s.begin():
+            o=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
+            if not o: raise ValueError("Panel Army order not found")
+            o.famgateway_order_id=str(famgateway_order_id)
+
+async def get_order_by_famgateway_id(famgateway_order_id):
+    async with Session() as s:
+        o=await s.scalar(select(Order).where(Order.famgateway_order_id==str(famgateway_order_id)))
+        if not o:return None
+        return {"order_id":o.order_id,"user_id":o.user_id,"product_id":o.product_id,"plan_id":o.plan_id,
+                "duration":o.duration,"quantity":o.quantity,"amount_inr":float(o.amount_inr),"status":o.status,
+                "payment_method":o.payment_method,"famgateway_order_id":o.famgateway_order_id,"created_at":o.created_at}
 
 async def expire_order(order_id):
     async with Session() as s:
@@ -432,7 +451,7 @@ async def fulfill_paid_order(order_id):
             order=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
             if not order:return None
             # Idempotency: never return a previously delivered key on a repeated
-            # Cashfree webhook / status check. Concurrent duplicate callbacks can
+            # FamGateway webhook / status check. Concurrent duplicate callbacks can
             # both read PENDING before this row lock; the second must not resend.
             if order.status=="PAID":return {"key_text":None,"user_id":order.user_id,"already_paid":True}
             if order.status not in ("PENDING","EXPIRED"):return None
@@ -444,7 +463,7 @@ async def fulfill_paid_order(order_id):
 
 
 async def credit_wallet_for_no_stock(order_id):
-    """Credit a successful Cashfree payment to the buyer's wallet exactly once."""
+    """Credit a successful external payment to the buyer's wallet exactly once."""
     async with Session() as s:
         async with s.begin():
             order=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
@@ -605,17 +624,17 @@ async def add_stock(plan_id, keys):
 
 async def list_orders(user_id):
     async with Session() as s:
-        stmt=(select(Order, Product.name).outerjoin(Product, Product.id==Order.product_id).where(Order.user_id==user_id, Order.payment_method!="TOPUP").order_by(Order.created_at.desc()).limit(30))
+        stmt=(select(Order, Product.name).outerjoin(Product, Product.id==Order.product_id).where(Order.user_id==user_id, Order.payment_method.notin_(("TOPUP", "FAM_TOPUP"))).order_by(Order.created_at.desc()).limit(30))
         rows=(await s.execute(stmt)).all()
         return [{"order_id":o.order_id,"user_id":o.user_id,"product_name":name or "Wallet Balance Top-up","amount_inr":float(o.amount_inr),"status":o.status,"duration":o.duration,"quantity":o.quantity,"key_text":o.key_text,"created_at":o.created_at,"payment_method":o.payment_method} for o,name in rows]
 
-async def create_topup_order(user_id, amount):
+async def create_topup_order(user_id, amount, payment_method="FAM_TOPUP"):
     amount = round(float(amount), 2)
     if amount < 10 or amount > 50000:
         raise ValueError("Top-up amount must be between ₹10 and ₹50,000")
     order_id="PA-TOPUP-"+secrets.token_hex(7).upper()
     async with Session() as s:
-        s.add(Order(order_id=order_id,user_id=user_id,product_id=None,plan_id=None,duration="Wallet Balance",quantity=1,amount_inr=round(float(amount),2),status="PENDING",payment_method="TOPUP"))
+        s.add(Order(order_id=order_id,user_id=user_id,product_id=None,plan_id=None,duration="Wallet Balance",quantity=1,amount_inr=round(float(amount),2),status="PENDING",payment_method=payment_method))
         await s.commit()
     return {"order_id":order_id}
 
@@ -623,7 +642,7 @@ async def fulfill_wallet_topup(order_id):
     async with Session() as s:
         async with s.begin():
             o=await s.scalar(select(Order).where(Order.order_id==order_id).with_for_update())
-            if not o or o.payment_method!="TOPUP": return None
+            if not o or o.payment_method not in ("TOPUP", "FAM_TOPUP"): return None
             if o.status=="PAID": return {"credited":False,"user_id":o.user_id,"amount":float(o.amount_inr)}
             if o.status not in ("PENDING","EXPIRED"): return None
             u=await s.scalar(select(User).where(User.user_id==o.user_id).with_for_update())
@@ -634,13 +653,13 @@ async def fulfill_wallet_topup(order_id):
                 return {"credited":False,"user_id":o.user_id,"amount":float(o.amount_inr)}
             u.wallet_balance=float(u.wallet_balance or 0)+float(o.amount_inr)
             o.status="PAID";o.paid_at=datetime.now(timezone.utc)
-            s.add(WalletTransaction(user_id=o.user_id,amount=o.amount_inr,kind="CREDIT",note=f"Cashfree wallet top-up {order_id}",admin_id=None,reference_id=f"TOPUP:{order_id}"))
+            s.add(WalletTransaction(user_id=o.user_id,amount=o.amount_inr,kind="CREDIT",note=f"FamGateway wallet top-up {order_id}",admin_id=None,reference_id=f"TOPUP:{order_id}"))
             return {"credited":True,"user_id":o.user_id,"amount":float(o.amount_inr)}
 
 async def user_order_stats(user_id):
     async with Session() as s:
-        count=int(await s.scalar(select(func.count(Order.order_id)).where(Order.user_id==user_id,Order.status=="PAID",Order.payment_method!="TOPUP")) or 0)
-        spent=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.user_id==user_id,Order.status=="PAID",Order.payment_method!="TOPUP")) or 0)
+        count=int(await s.scalar(select(func.count(Order.order_id)).where(Order.user_id==user_id,Order.status=="PAID",Order.payment_method.notin_(("TOPUP", "FAM_TOPUP")))) or 0)
+        spent=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.user_id==user_id,Order.status=="PAID",Order.payment_method.notin_(("TOPUP", "FAM_TOPUP")))) or 0)
         return {"orders":count,"spent":spent}
 
 async def set_reseller(user_id, enabled=True):
@@ -665,15 +684,15 @@ async def dashboard_stats():
     async with Session() as s:
         users=int(await s.scalar(select(func.count(User.user_id))) or 0)
         orders=int(await s.scalar(select(func.count(Order.order_id))) or 0)
-        paid=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID", Order.payment_method!="TOPUP")) or 0)
-        revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method!="TOPUP")) or 0)
+        paid=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID", Order.payment_method.notin_(("TOPUP", "FAM_TOPUP")))) or 0)
+        revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method.notin_(("TOPUP", "FAM_TOPUP")))) or 0)
         stock=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.status=="AVAILABLE")) or 0)
         sold_stock=int(await s.scalar(select(func.count(KeyStock.id)).where(KeyStock.status=="SOLD")) or 0)
         resellers=int(await s.scalar(select(func.count(User.user_id)).where(User.is_reseller==True)) or 0)
         pending=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status.in_(["PENDING","EXPIRED","PAID_NO_STOCK"]))) or 0)
         india_tz=timezone(timedelta(hours=5, minutes=30)); now=datetime.now(india_tz); today_start=now.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc)
-        today_revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method!="TOPUP", Order.paid_at >= today_start)) or 0)
-        today_orders=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID",Order.payment_method!="TOPUP",Order.paid_at>=today_start)) or 0)
+        today_revenue=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(Order.status=="PAID", Order.payment_method.notin_(("TOPUP", "FAM_TOPUP")), Order.paid_at >= today_start)) or 0)
+        today_orders=int(await s.scalar(select(func.count(Order.order_id)).where(Order.status=="PAID",Order.payment_method.notin_(("TOPUP", "FAM_TOPUP")),Order.paid_at>=today_start)) or 0)
         return {"users":users,"resellers":resellers,"orders":orders,"paid":paid,"pending":pending,"revenue":revenue,"today_revenue":today_revenue,"today_orders":today_orders,"stock":stock,"sold_stock":sold_stock}
 
 async def search_users(term, limit=15):

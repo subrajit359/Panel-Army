@@ -1,128 +1,39 @@
-# Panel Army (flat-root Railway project)
+# Panel Army Store
 
-This starter is a Telegram storefront for legitimate digital products/license keys, with PostgreSQL inventory and Cashfree payment integration. All project files are in this root directory; there are no nested project folders.
+Telegram storefront built with Python, aiogram and PostgreSQL.
 
-## Railway variables
-Set these in Railway:
-- `BOT_TOKEN`: BotFather token
-- `ADMIN_IDS`: Telegram admin user IDs, comma-separated
-- `DATABASE_URL`: PostgreSQL connection URL (AWS RDS Singapore is supported; use the private/VPC route if Railway networking is configured for it)
-- `CASHFREE_APP_ID`
-- `CASHFREE_SECRET_KEY`
-- `CASHFREE_ENV`: `sandbox` while testing; `production` for live
-- `PUBLIC_BASE_URL`: your Railway public domain including `https://`
+## Railway environment variables
+
+Required:
+- `BOT_TOKEN`
+- `ADMIN_IDS`
+- `DATABASE_URL`
+- `FAMGATEWAY_API_KEY`
+- `PUBLIC_BASE_URL` — public HTTPS Railway domain, without a trailing slash
+
+Optional PostgreSQL pool tuning:
+- `DB_POOL_SIZE` (default 5)
+- `DB_MAX_OVERFLOW` (default 5)
+- `DB_POOL_TIMEOUT` (default 8)
+- `DB_POOL_RECYCLE` (default 1800)
+- `DB_SSL` (default `require`)
+
+## Payment flow
+
+Product purchases and wallet top-ups use FamGateway dynamic UPI QR sessions. The bot displays the QR image in Telegram, polls FamGateway server-side every four seconds, and also accepts signed webhooks. Payment is only fulfilled after an authoritative FamGateway status check and exact order/amount matching. Database locks and unique wallet transaction references prevent duplicate delivery or credit.
+
+See `README_FAMGATEWAY_INTEGRATION.txt` for the FamGateway dashboard and webhook setup.
 
 ## Deploy
-1. Create a Railway project and add a PostgreSQL service.
-2. Deploy this repository.
-3. Add the variables above to the bot service. Ensure `DATABASE_URL` is available from the PostgreSQL service reference.
-4. Set the Cashfree webhook URL to `https://YOUR_DOMAIN/cashfree/webhook`.
-5. Test with Cashfree sandbox before switching to production.
 
-## Admin controls
-- `/admin` opens the inline admin control panel.
-- Open **Key Stock** → **Add / Update Key Stock** for the guided, button-first inventory workflow.
-- Select an existing category, or tap **Create new category**.
-- Select an existing product, or create a product and enter an optional description.
-- Select an existing plan to edit its duration and INR prices, deactivate it, or upload more keys. Create plans with customer INR and reseller INR prices only.
-- Paste keys in bulk, one key per line. Duplicate keys are skipped and the result reports submitted, added, and duplicate counts.
-- `/addstock PLAN_ID` remains available as a legacy shortcut; it now uses the same state-based bulk upload flow.
-- `/wallet USER_ID|AMOUNT_INR` — admin credit to a user's wallet
-- `/setreseller USER_ID` — enable reseller pricing
-- `/products`
-- `/orders`
-- `/cancel`
+1. Replace the old project files with the contents of this ZIP.
+2. Set the environment variables above in Railway.
+3. Keep your existing PostgreSQL `DATABASE_URL`; do not reset the database.
+4. Set the webhook URL in FamGateway to `https://YOUR-RAILWAY-DOMAIN/famgateway/webhook`.
+5. Deploy and make a small real payment test. Confirm that funds reach the intended receiving account and the bot fulfills the order once.
 
-The shop flow includes category → product → duration plan → wallet or UPI / Paytm (INR) checkout via Cashfree. Cashfree payment links are displayed as a QR code and online-payment button. Verified payments fulfill keys automatically. Wallet purchases debit and fulfill within a database transaction. If a paid order cannot be fulfilled due to insufficient stock, the amount is returned to the wallet once.
+The startup migration adds the FamGateway order reference and unique index without deleting existing order or inventory records. Old Cashfree code is no longer active in this build; historical database columns are retained to avoid destructive schema changes.
 
-## Important production hardening
-- Cashfree webhook signature verification is included. The webhook queries Cashfree Payment Links API status and amount before fulfillment. Test event payloads with your Cashfree sandbox dashboard before live use.
-- The checkout flow requests a valid Indian mobile number before creating the Cashfree Payment Link.
-- Configure wallet top-up flow before letting users self-fund wallets; the included `/wallet` command is admin-only. Add delivery retry queue, rate limits, admin audit logs, privacy notice, refund process, and backup/monitoring before launch.
-- Never commit `.env` or real payment credentials.
-- Sell only authorized, lawful digital goods. Do not use this bot to distribute spyware, stolen credentials, or unauthorized personal-data access.
+## Important
 
-
-## Railway startup troubleshooting
-
-- Set `BOT_TOKEN` in Railway Variables to the token from @BotFather. The app intentionally exits if this variable is missing.
-- This package installs SQLAlchemy with its asyncio extra (`SQLAlchemy[asyncio]`), which includes `greenlet`. Redeploy after updating the requirements.
-
-## Telegram admin control panel
-Open `/admin` as an account listed in `ADMIN_IDS` to use the inline admin menu. The panel provides dashboard totals, user search/profile, ban/unban, wallet adjustment, product/category/plan management, key stock, payment/order review, reseller toggling, broadcasts, coupon creation, settings storage, referral reward stock and admin audit logs. Management actions are started from inline buttons; text is requested only for values such as names, prices, IDs and key batches. Categories can be renamed or removed (their products are moved to Other Products); products and plans can be edited or deactivated without deleting order history. All customer-facing prices and plan creation inputs use INR only.
-
-### Additional admin commands
-- `/walletadjust USER_ID|AMOUNT` — credit with a positive amount or deduct with a negative amount; refuses a negative resulting balance.
-- `/wallethistory USER_ID` — wallet adjustment and wallet-purchase ledger.
-- `/editproduct ID|NAME|CATEGORY|DESCRIPTION` — edit product metadata.
-- `/deleteproduct ID` — soft-delete a product and its plans (inventory/order history is retained).
-- `/keys PLAN_ID|STATUS` — list key IDs/status (status is optional).
-- `/stockstatus KEY_ID|AVAILABLE` (or `SOLD` / `EXPIRED`) — update an individual key state.
-- `/paymentcheck ORDER_ID` — query the current Cashfree payment-link status and paid amount.
-- `/refundrecord ORDER_ID|STATUS|NOTE` and `/refunds` — track refund progress. Actual refunds must be initiated in Cashfree's dashboard; this bot does not issue refunds through the Cashfree API.
-- `/resellerprice PLAN_ID|INR|USD`, `/unreseller USER_ID` — reseller pricing and deactivation.
-- `/coupon CODE|DISCOUNT_PERCENT|USAGE_LIMIT` — create a coupon record (checkout redemption is not yet connected).
-- `/setting KEY|VALUE` — persist a bot setting (the current payment credentials and deployment configuration still come from environment variables; generic settings are not yet applied to checkout logic).
-- `/broadcast_resellers` — start a reseller-only broadcast; `/admin` → Broadcast sends to all non-banned users.
-
-New tables for wallet transactions, coupons, bot settings, refund records and admin logs are created automatically by SQLAlchemy `create_all`; existing tables are not dropped. Back up the database before deploying schema changes.
-
-
-## Latest customer menu update
-- `/start` is listed as **Open Shop Menu** and returns verified users to the full store welcome screen.
-- Dashboard/back navigation returns to the store welcome screen.
-- Profile and order history show wallet, purchase statistics, delivered keys, dates, and order status.
-- Bulk checkout supports quantities 1, 5, 10, 15, and a custom quantity (maximum 100 per order). Stock availability is hidden from customers and checked atomically after payment; if stock is insufficient, the paid amount is credited to the customer wallet exactly once.
-- Wallet top-ups support ₹10, ₹20, ₹50, ₹100, or a custom amount (minimum ₹10) through Cashfree UPI QR. Successful top-ups are credited once via webhook or manual status check.
-- Support screen points to @subro98.
-
-The database startup migration makes `orders.product_id` nullable so wallet top-up records can share the existing payment tracking table. Existing order and user data are preserved.
-
-
-## Referral rewards
-- Each customer has a unique Telegram deep link: `https://t.me/panelxarmy_bot?start=ref_USER_ID`.
-- A new user is attributed only once, cannot refer themselves, and must join through the link before making a paid purchase.
-- After that referred user's first successful key delivery (Cashfree or wallet), the referrer receives one pending trial-key reward.
-- The referrer chooses Root or Non-Root. The bot randomly reserves one available key from a product whose name/category identifies it as Root or Non-Root.
-- Admins add referral trial keys through **🎁 Reward Key Stock** in the admin menu. Root and Non-Root reward inventories are separate from normal shop inventory. If the selected type has no available reward key, the reward stays pending until stock is added.
-- Existing users are not retroactively assigned a referrer. Referral counts and claimed trial keys are stored in PostgreSQL.
-
-
-
-## Performance settings
-
-The bot uses SQLAlchemy async connection pooling with `pool_pre_ping`, a bounded pool, and connection recycling. With AWS RDS and Railway in Singapore, keep both endpoints in the same region and use a private/VPC connection when your AWS/Railway network setup supports it. A same-region placement reduces network distance but does not guarantee a fixed response time. Optional Railway variables:
-
-- `DB_POOL_SIZE=5` (default)
-- `DB_MAX_OVERFLOW=5` (default)
-- `DB_POOL_TIMEOUT=8` seconds (default)
-- `DB_POOL_RECYCLE=1800` seconds (default)
-
-Start with these defaults for one bot process. Increase pool size only after checking the AWS RDS connection limit and actual concurrent load. The catalogue queries are batched to avoid per-product/per-plan N+1 database round trips.
-
-
-## Latest performance and safety improvements
-
-- PostgreSQL pool size, overflow, timeout and recycle settings are configurable and bounded.
-- Added indexes for common stock, order-history, admin-log, wallet-history and referral lookups. Migrations are additive (`IF NOT EXISTS`) and do not delete customer/order data.
-- Customer product browsing avoids inventory count queries because stock is intentionally hidden. Product/plan catalogue loading avoids N+1 query patterns.
-- Telegram callback queries are acknowledged immediately; banned-user checks use a short-lived bounded cache to avoid repeated database round trips on rapid taps.
-- Cashfree HTTP keep-alive sessions are reused safely; payment-status GET requests have a single bounded retry for transient network/provider errors. Payment-creation POST requests are not blindly retried, avoiding accidental duplicate order creation.
-- Webhook request bodies are size-limited, payment fulfillment remains database-locked/idempotent, and database/HTTP pools are closed cleanly on shutdown.
-- Custom bulk quantities are validated (1–100), top-ups are validated (₹10–₹50,000), and product/category callback data is kept within Telegram's callback-data size limit.
-
-For production, monitor AWS RDS connection count, CPU, free memory and query latency before increasing `DB_POOL_SIZE`; each running bot process owns its own pool. Never share `DATABASE_URL`, Cashfree secrets or the Telegram bot token in chat or logs.
-
-## Admin Management 3.0 update
-
-The catalogue and inventory workflows are now separated:
-
-- **Categories** are folders only: add, rename, delete with confirmation, and view product counts. No category active/inactive switch is provided.
-- **Products** are created from inside a category and can be renamed, moved to another category, placed into/out of maintenance, or safely archived/deleted.
-- **Plans & Pricing** supports adding one plan or bulk-creating plans, customer INR and reseller INR prices, editing duration/prices, and confirmed removal from the active catalogue. Plans with history are deactivated rather than physically destroyed.
-- **Stock Manager** only selects existing categories, products and plans. Catalogue creation is not offered inside the stock upload flow.
-- **Stock imports** show a summary preview and require confirmation before writing keys. Key values are not echoed in the preview or admin log.
-- Product names are checked for duplicates within a category (case-insensitive); category creation and renaming use case-insensitive collision checks.
-- The duplicate `ac:category:` callback registration has been removed so category selection has one unambiguous handler.
-
-The existing PostgreSQL crash-fix migration and global stock-key deduplication are retained. This update has been syntax-checked and statically inspected; live Telegram, Railway, PostgreSQL and Cashfree testing still needs to be performed in the deployed environment.
+Live FamGateway merchant access, Railway deployment, Telegram delivery and real-money transactions cannot be tested from this build environment. Confirm the provider's terms and that your product category is permitted before accepting payments. Never share your API key, bot token or database URL.
