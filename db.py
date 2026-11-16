@@ -69,6 +69,7 @@ class Product(Base):
     price_inr: Mapped[float] = mapped_column(Numeric(10,2), default=0)  # legacy compatibility
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     category: Mapped[str] = mapped_column(String(100), default="Other Products")
+    game: Mapped[str] = mapped_column(String(80), default="Free Fire", nullable=False)
     maintenance: Mapped[bool] = mapped_column(Boolean, default=False)
 
 class ProductPlan(Base):
@@ -186,6 +187,9 @@ async def init_db():
             "ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference_id VARCHAR(100)",
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_wallet_transactions_reference ON wallet_transactions (reference_id) WHERE reference_id IS NOT NULL",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Other Products'",
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS game VARCHAR(80) NOT NULL DEFAULT 'Free Fire'",
+            "UPDATE products SET game = 'Free Fire' WHERE game IS NULL OR btrim(game) = ''",
+            "CREATE INDEX IF NOT EXISTS ix_products_active_game_category_id ON products (active, game, category, id)",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS maintenance BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE key_stock ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES product_plans(id)",
             # One order may contain multiple keys; order_id must therefore be non-unique on key_stock.
@@ -252,11 +256,14 @@ async def set_user_phone(user_id, phone):
             u.phone=phone
             await s.commit()
 
-async def list_categories():
+async def list_categories(game=None):
     async with Session() as s:
-        rows = (await s.execute(select(Product.category, func.count(Product.id)).where(Product.active == True).group_by(Product.category))).all()
+        category_stmt = select(Product.category, func.count(Product.id)).where(Product.active == True)
+        if game:
+            category_stmt = category_stmt.where(Product.game == game)
+        rows = (await s.execute(category_stmt.group_by(Product.category))).all()
         counts = {name: int(count) for name, count in rows}
-        saved = (await s.scalars(select(ProductCategory.name).order_by(ProductCategory.name))).all()
+        saved = (await s.scalars(select(ProductCategory.name).order_by(ProductCategory.name))).all() if not game else []
         for name in saved:
             counts.setdefault(name, 0)
         return [{"name": name, "count": counts[name]} for name in sorted(counts)]
@@ -272,10 +279,12 @@ async def create_category_admin(name):
             s.add(ProductCategory(name=name))
         return True
 
-async def list_products(category=None, include_empty=False):
+async def list_products(category=None, include_empty=False, game=None):
     """Load the catalogue in a bounded number of queries (avoid per-plan N+1 counts)."""
     async with Session() as s:
         product_stmt = select(Product).where(Product.active == True).order_by(Product.id)
+        if game:
+            product_stmt = product_stmt.where(Product.game == game)
         if category:
             # Match category names robustly if older rows contain accidental
             # whitespace/case differences from previous admin versions.
@@ -316,7 +325,7 @@ async def list_products(category=None, include_empty=False):
             if include_empty or stock_count > 0 or product_plans:
                 output.append({
                     "id": p.id, "name": p.name, "description": p.description,
-                    "category": p.category, "maintenance": bool(p.maintenance), "stock": stock_count, "plans": product_plans,
+                    "category": p.category, "game": p.game, "maintenance": bool(p.maintenance), "stock": stock_count, "plans": product_plans,
                 })
         return output
 
@@ -347,7 +356,7 @@ async def get_product(product_id, include_stock=False):
         } for _, pl, stock in rows if pl is not None]
         return {
             "id": product.id, "name": product.name, "description": product.description,
-            "category": product.category, "maintenance": bool(product.maintenance), "plans": plans,
+            "category": product.category, "game": product.game, "maintenance": bool(product.maintenance), "plans": plans,
         }
 
 
@@ -602,7 +611,7 @@ async def claim_referral_reward(user_id, reward_type):
             reward.reward_type=reward_type;reward.key_text=key.key_text;reward.status="CLAIMED";reward.claimed_at=datetime.now(timezone.utc)
             return {"key_text":key.key_text,"reward_type":reward_type,"reward_id":reward.id}
 
-async def add_product(name, price, description, category="Other Products"):
+async def add_product(name, price, description, category="Other Products", game="Free Fire"):
     # Normalize and persist category explicitly so newly created products are
     # immediately visible in the customer catalogue and admin category list.
     name=(name or "").strip()
@@ -623,10 +632,12 @@ async def add_product(name, price, description, category="Other Products"):
                 category=existing_category
             else:
                 s.add(ProductCategory(name=category))
-            p=Product(name=name,price_inr=price,description=description or "",category=category,active=True,maintenance=False)
+            game=(game or "Free Fire").strip()
+            if not game or len(game)>80: raise ValueError("Invalid game name")
+            p=Product(name=name,price_inr=price,description=description or "",category=category,game=game,active=True,maintenance=False)
             s.add(p)
             await s.flush()
-            result={"id":p.id,"name":p.name,"category":p.category,"active":bool(p.active)}
+            result={"id":p.id,"name":p.name,"category":p.category,"game":p.game,"active":bool(p.active)}
         return result
 
 async def add_plan(product_id,duration,price_inr,price_usd,reseller_price_inr,reseller_price_usd):
