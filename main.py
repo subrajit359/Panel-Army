@@ -896,10 +896,20 @@ async def ac_game_remove(call:CallbackQuery):
 async def ac_admin_choose_game(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):
         await callback_answer(call,"Admin only",show_alert=True);return
-    token=call.data.split(":",1)[1]
-    game=next((g for g in await list_games() if game_hash(g)==token),None)
+    token=call.data.split(":",2)[2] if call.data.count(":") >= 2 else ""
+    # Resolve against the complete catalogue, not only customer-visible games.
+    # This also keeps already-open admin keyboards working if a game was archived
+    # after the keyboard was rendered. Accept older hash lengths for stale buttons.
+    all_games=await list_games(active_only=False)
+    game=next((g for g in all_games if game_hash(g)==token or hashlib.sha256(g.encode("utf-8")).hexdigest().startswith(token)),None)
     if not game:
-        await callback_answer(call,"Game not found. Refresh Products.",show_alert=True);return
+        active_games=await list_games()
+        rows=[[InlineKeyboardButton(text=f"🎮 {g}",callback_data=f"ac:game:{game_hash(g)}",style="primary")] for g in active_games]
+        rows += [[InlineKeyboardButton(text="➕ Add game",callback_data="ac:gameadd",style="success")],
+                 [InlineKeyboardButton(text="⚙️ Manage games",callback_data="ac:gamemanage",style="primary")],
+                 [InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:products",style="success")]]
+        await call.message.edit_text("📦 <b>PRODUCT MANAGEMENT</b>\n\nThe selected game is no longer in the current catalogue. The game list has been refreshed; choose a game again.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await callback_answer(call,"Game list refreshed. Please choose again.",show_alert=True);return
     await state.update_data(admin_game=game)
     cats=await list_categories(game=game)
     rows=[[InlineKeyboardButton(text=f"📁 {c['name']} · {c['count']} products",callback_data=f"ac:category:{i}",style="primary")] for i,c in enumerate(cats)]
