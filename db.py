@@ -434,7 +434,12 @@ async def get_plan(plan_id, include_stock=False):
         return result
 
 
-async def get_plan(plan_id):
+async def get_plan(plan_id, include_stock=False):
+    """Fetch an active plan; include_stock is accepted for admin detail callers.
+
+    Stock is included in the result for backward compatibility with checkout and
+    admin screens, regardless of the flag.
+    """
     async with Session() as s:
         stock_count = select(func.count(KeyStock.id)).where(
             KeyStock.plan_id == ProductPlan.id, KeyStock.status == "AVAILABLE"
