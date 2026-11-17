@@ -466,6 +466,8 @@ async def create_order(user_id, plan_id, amount, quantity=1, payment_method="FAM
     user=await get_user(user_id)
     if not pl or not user or quantity < 1 or quantity > 100: raise ValueError("Invalid plan, customer or quantity (maximum 100)")
     if pl.get("maintenance"): raise ValueError(f"{pl['product_name']} is under maintenance")
+    if user.get('is_reseller') and float(pl.get('reseller_price_inr') or 0) <= 0:
+        raise ValueError("Reseller price is not configured for this plan")
     expected_unit=pl['reseller_price_inr'] if user.get('is_reseller') else pl['price_inr']
     expected=round(float(expected_unit)*int(quantity),2)
     amount = round(float(amount), 2)
@@ -715,7 +717,7 @@ async def add_or_update_customer_plan(product_id, duration, customer_price):
                 return {"id":plan.id,"duration":plan.duration,"created":False}
             had_plans=bool(await s.scalar(select(func.count(ProductPlan.id)).where(ProductPlan.product_id==product_id)))
             plan=ProductPlan(product_id=product_id,duration=duration,price_inr=customer_price,
-                price_usd=0,reseller_price_inr=customer_price,reseller_price_usd=0)
+                price_usd=0,reseller_price_inr=0,reseller_price_usd=0)
             s.add(plan); await s.flush()
             if not had_plans:
                 await s.execute(text("UPDATE key_stock SET plan_id=:plan WHERE product_id=:product AND plan_id IS NULL"), {"plan":plan.id,"product":product_id})

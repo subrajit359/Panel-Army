@@ -254,6 +254,8 @@ def plan_keyboard(product,user=None):
     reseller=bool(user and user["is_reseller"])
     rows=[]
     for plan in product['plans']:
+        if reseller and float(plan.get('reseller_price_inr') or 0) <= 0:
+            continue
         shown_inr=plan['reseller_price_inr'] if reseller else plan['price_inr']
         label=f"🔑 [{plan['duration']}] » ₹{shown_inr:.2f}"
         rows.append([InlineKeyboardButton(text=label,callback_data=f"plan:{plan['id']}", style="primary")])
@@ -437,7 +439,10 @@ async def plan_view(call:CallbackQuery):
     if not p:await callback_answer(call, "This plan is unavailable.",show_alert=True);return
     if p.get("maintenance"):
         await call.message.edit_text(f"🛠️ <b>{html.escape(p['product_name'])} is under maintenance.</b>\nPlease check back later.",reply_markup=home_keyboard()); return
-    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit,2)
+    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller'])
+    if reseller and float(p.get('reseller_price_inr') or 0) <= 0:
+        await callback_answer(call, "Reseller price is not set for this plan. Contact admin.", show_alert=True); return
+    unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit,2)
     status="✅ Online"
     if reseller:
         savings=max(0.0,p['price_inr']-p['reseller_price_inr'])
@@ -1129,26 +1134,36 @@ async def ac_plan_detail(call:CallbackQuery):
         if not pl:
             await call.message.answer("⚠️ Plan not found. Please reopen Products & Plans.")
             return
+        reseller_display = f"₹{pl['reseller_price_inr']:.2f}" if float(pl['reseller_price_inr'] or 0) > 0 else "Not set"
         kb=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Edit customer & reseller prices",callback_data=f"ac:planedit:{pid}",style="primary")],
+            [InlineKeyboardButton(text="✏️ Edit customer price",callback_data=f"ac:planeditcustomer:{pid}",style="primary")],
+            [InlineKeyboardButton(text="👑 Edit reseller price",callback_data=f"ac:planeditreseller:{pid}",style="primary")],
             [InlineKeyboardButton(text="🔑 Add keys to this plan",callback_data=f"stk:plan:{pid}",style="primary")],
             [InlineKeyboardButton(text="🗑️ Delete plan",callback_data=f"ac:plandelete:{pid}",style="danger")],
             [InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{pl['product_id']}",style="primary")]
         ] + admin_nav_rows())
         detail=(f"🗓️ <b>{html.escape(pl['duration'])}</b>\n"
                 f"Customer: ₹{pl['price_inr']:.2f}\n"
-                f"Reseller: ₹{pl['reseller_price_inr']:.2f}\n"
+                f"Reseller: {reseller_display}\n"
                 f"Available keys: {pl['stock']}")
         await call.message.answer(detail, reply_markup=kb)
     except Exception:
         log.exception("Admin plan detail callback failed")
         await call.message.answer("⚠️ Could not open this plan. Please try again or check the bot logs.")
 
-@dp.callback_query(F.data.startswith("ac:planedit:"))
-async def ac_plan_edit(call:CallbackQuery,state:FSMContext):
-    if not is_admin(call.from_user.id):await callback_answer(call, "Admin only",show_alert=True);return
-    pid=int(call.data.rsplit(":",1)[1]);await state.set_state(AdminState.admin_input);await state.update_data(admin_action="plan_edit",plan_id=pid)
-    await call.message.answer("Send <code>Duration | Customer INR | Reseller INR</code> (example: <code>10 Days | 99 | 79</code>).");await callback_answer(call, )
+@dp.callback_query(F.data.startswith("ac:planeditcustomer:"))
+async def ac_plan_edit_customer(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call, "Admin only", show_alert=True); return
+    pid=int(call.data.rsplit(":",1)[1]); await state.set_state(AdminState.admin_input); await state.update_data(admin_action="plan_edit_customer",plan_id=pid)
+    await call.message.answer("Send the new <b>customer price</b> in INR only. This will not change reseller price. Send <code>0</code> only if you intend a free plan.")
+    await callback_answer(call)
+
+@dp.callback_query(F.data.startswith("ac:planeditreseller:"))
+async def ac_plan_edit_reseller(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call, "Admin only", show_alert=True); return
+    pid=int(call.data.rsplit(":",1)[1]); await state.set_state(AdminState.admin_input); await state.update_data(admin_action="plan_edit_reseller",plan_id=pid)
+    await call.message.answer("Send the new <b>reseller price</b> in INR only. Send <code>0</code> to clear/unset reseller pricing. Customer price will not change.")
+    await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("ac:plandelete:"))
 async def ac_plan_delete(call:CallbackQuery):
@@ -1332,6 +1347,14 @@ async def admin_button_input(message:Message,state:FSMContext):
             pid=int(data["plan_id"]);duration,price,reseller=[x.strip() for x in raw.split("|")]
             ok=await edit_plan_admin(pid,duration,float(price),float(reseller))
             await message.answer("✅ Plan updated." if ok else "Plan not found.",reply_markup=admin_keyboard())
+        elif action=="plan_edit_customer":
+            pid=int(data["plan_id"]); price=float(raw.strip())
+            ok=await edit_plan_admin(pid,price_inr=price)
+            await message.answer("✅ Customer price updated. Reseller price was left unchanged." if ok else "Plan not found.",reply_markup=admin_keyboard())
+        elif action=="plan_edit_reseller":
+            pid=int(data["plan_id"]); price=float(raw.strip())
+            ok=await edit_plan_admin(pid,reseller_price_inr=price)
+            await message.answer(("✅ Reseller price cleared (not set)." if price==0 else "✅ Reseller price updated.")+" Customer price was left unchanged." if ok else "Plan not found.",reply_markup=admin_keyboard())
         elif action=="plan_customer_add":
             duration,price=[x.strip() for x in raw.split("|",1)]
             result=await add_or_update_customer_plan(int(data["product_id"]),duration,float(price))
