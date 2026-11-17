@@ -141,15 +141,19 @@ async def recover_famgateway_orders_on_startup():
                 await expire_order(order["order_id"])
                 order = await get_order(row["order_id"])
                 expired_during_recovery = bool(order and order.get("status") == "EXPIRED")
-            paid, provider_status, _ = await famgateway_payment_confirmed(order)
-            if paid:
-                await deliver_famgateway_order(order)
-            elif provider_status == "EXPIRED":
-                await expire_order(order["order_id"])
-            elif order["status"] == "PENDING" and expires_at and expires_at > now:
-                asyncio.create_task(monitor_famgateway_order(order["order_id"]))
-            elif expired_during_recovery:
-                await bot.send_message(order["user_id"], "⌛ <b>Payment QR Expired</b>\n\nYour 5-minute payment window ended while the bot was restarting. If you already paid, your verified payment will still be handled safely.")
+            try:
+                paid, provider_status, _ = await famgateway_payment_confirmed(order)
+                if paid:
+                    await deliver_famgateway_order(order)
+                elif provider_status == "EXPIRED":
+                    await expire_order(order["order_id"])
+                elif order["status"] == "PENDING" and expires_at and expires_at > now:
+                    asyncio.create_task(monitor_famgateway_order(order["order_id"]))
+                elif expired_during_recovery:
+                    await bot.send_message(order["user_id"], "⌛ <b>Payment QR Expired</b>\n\nYour 5-minute payment window ended while the bot was restarting. If you already paid, your verified payment will still be handled safely.")
+            except Exception:
+                # A single provider/network failure must not stop recovery of other orders.
+                log.exception("FamGateway recovery failed for order %s", order.get("order_id"))
     except Exception:
         log.exception("FamGateway startup payment recovery failed")
 
@@ -373,9 +377,9 @@ async def customer_choose_game(call:CallbackQuery):
         await callback_answer(call,"Game list changed. Reopen the shop.",show_alert=True);return
     cats=await list_categories(game=game)
     if not cats:
-        await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\\n\\nNo categories or products are available yet.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Choose Game",callback_data="shop",style="primary")]]))
+        await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\n\nNo categories or products are available yet.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Choose Game",callback_data="shop",style="primary")]]))
     else:
-        await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\\n\\n📂 <b>Choose Category</b>",reply_markup=category_keyboard(cats,game))
+        await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\n\n📂 <b>Choose Category</b>",reply_markup=category_keyboard(cats,game))
     await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("category:"))

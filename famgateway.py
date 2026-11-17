@@ -84,6 +84,10 @@ async def verify_payment(fam_order_id: str, expected_amount: float):
             body = await response.json(content_type=None)
         except Exception as exc:
             raise RuntimeError("FamGateway returned invalid JSON during payment verification") from exc
+        if response.status == 408:
+            # FamGateway uses HTTP 408 for an order whose payment window expired.
+            # Treat it as a normal unpaid terminal state, not a startup exception.
+            return False, "EXPIRED", 0.0
         if response.status != 200 or not isinstance(body, dict):
             message = body.get("message") if isinstance(body, dict) else "provider error"
             raise RuntimeError(f"FamGateway verify-order HTTP {response.status}: {str(message or 'provider error')[:180]}")
