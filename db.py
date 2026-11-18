@@ -406,35 +406,6 @@ async def get_product(product_id, include_stock=False):
 
 
 async def get_plan(plan_id, include_stock=False):
-    async with Session() as s:
-        if include_stock:
-            stock_count = select(func.count(KeyStock.id)).where(
-                KeyStock.plan_id == ProductPlan.id, KeyStock.status == "AVAILABLE"
-            ).correlate(ProductPlan).scalar_subquery()
-            stmt = select(ProductPlan, Product, stock_count.label("stock"))
-        else:
-            stmt = select(ProductPlan, Product, literal(None))
-        row = (await s.execute(
-            stmt.join(Product, Product.id == ProductPlan.product_id)
-            .where(ProductPlan.id == plan_id, ProductPlan.active == True, Product.active == True)
-        )).first()
-        if not row:
-            return None
-        pl, product, stock = row
-        result = {
-            "id": pl.id, "product_id": pl.product_id, "product_name": product.name,
-            "category": product.category, "description": product.description, "maintenance": bool(product.maintenance),
-            "duration": pl.duration, "price_inr": float(pl.price_inr),
-            "price_usd": float(pl.price_usd),
-            "reseller_price_inr": float(pl.reseller_price_inr),
-            "reseller_price_usd": float(pl.reseller_price_usd),
-        }
-        if include_stock:
-            result["stock"] = int(stock or 0)
-        return result
-
-
-async def get_plan(plan_id, include_stock=False):
     """Fetch an active plan; include_stock is accepted for admin detail callers.
 
     Stock is included in the result for backward compatibility with checkout and
@@ -466,9 +437,9 @@ async def create_order(user_id, plan_id, amount, quantity=1, payment_method="FAM
     user=await get_user(user_id)
     if not pl or not user or quantity < 1 or quantity > 100: raise ValueError("Invalid plan, customer or quantity (maximum 100)")
     if pl.get("maintenance"): raise ValueError(f"{pl['product_name']} is under maintenance")
-    if user.get('is_reseller') and float(pl.get('reseller_price_inr') or 0) <= 0:
-        raise ValueError("Reseller price is not configured for this plan")
     expected_unit=pl['reseller_price_inr'] if user.get('is_reseller') else pl['price_inr']
+    if float(expected_unit or 0) <= 0:
+        raise ValueError("Price is not set for your account type")
     expected=round(float(expected_unit)*int(quantity),2)
     amount = round(float(amount), 2)
     if amount <= 0 or amount > 500000 or abs(amount-expected)>0.009:
@@ -538,7 +509,7 @@ async def pay_wallet(user_id, plan_id, quantity=1, idempotency_token=None):
             unit_price=float(pl.reseller_price_inr if u.is_reseller else pl.price_inr)
             amount=round(unit_price*quantity,2)
             if amount <= 0:
-                raise ValueError("Invalid plan price")
+                raise ValueError("Price is not set for your account type")
             if float(u.wallet_balance or 0)<amount:
                 raise ValueError("Insufficient wallet balance")
             o=Order(order_id=order_id,user_id=user_id,product_id=pl.product_id,plan_id=plan_id,
@@ -700,7 +671,7 @@ async def add_plan(product_id,duration,price_inr,price_usd,reseller_price_inr,re
 
 async def add_or_update_customer_plan(product_id, duration, customer_price):
     duration=str(duration or "").strip(); customer_price=float(customer_price)
-    if not duration or len(duration)>80 or not 0<=customer_price<=500000:
+    if not duration or len(duration)>80 or not 0<customer_price<=500000:
         raise ValueError("Invalid plan duration or customer price")
     async with Session() as s:
         async with s.begin():
@@ -726,7 +697,7 @@ async def add_or_update_customer_plan(product_id, duration, customer_price):
 
 async def update_reseller_price_by_duration(product_id, duration, reseller_price):
     duration=str(duration or "").strip(); reseller_price=float(reseller_price)
-    if not duration or not 0<=reseller_price<=500000:
+    if not duration or not 0<reseller_price<=500000:
         raise ValueError("Invalid plan duration or reseller price")
     async with Session() as s:
         async with s.begin():
@@ -746,7 +717,7 @@ async def bulk_customer_plan_prices(product_id, entries):
     cleaned=[]; seen=set()
     for duration, price in entries:
         duration=str(duration or "").strip(); price=float(price)
-        if not duration or len(duration)>80 or not 0<=price<=500000:
+        if not duration or len(duration)>80 or not 0<price<=500000:
             raise ValueError("Invalid duration or customer price")
         key=duration.casefold()
         if key in seen: raise ValueError(f"Duplicate duration in input: {duration}")
@@ -768,7 +739,7 @@ async def bulk_customer_plan_prices(product_id, entries):
                     results.append({"id":plan.id,"duration":plan.duration,"created":False})
                 else:
                     plan=ProductPlan(product_id=product_id,duration=duration,price_inr=price,price_usd=0,
-                                     reseller_price_inr=price,reseller_price_usd=0)
+                                     reseller_price_inr=0,reseller_price_usd=0)
                     s.add(plan); await s.flush()
                     results.append({"id":plan.id,"duration":plan.duration,"created":True})
                     if not had_plans:
@@ -783,7 +754,7 @@ async def bulk_reseller_plan_prices(product_id, entries):
     cleaned=[]; seen=set()
     for duration, price in entries:
         duration=str(duration or "").strip(); price=float(price)
-        if not duration or len(duration)>80 or not 0<=price<=500000:
+        if not duration or len(duration)>80 or not 0<price<=500000:
             raise ValueError("Invalid duration or reseller price")
         key=duration.casefold()
         if key in seen: raise ValueError(f"Duplicate duration in input: {duration}")
@@ -959,11 +930,32 @@ async def search_users(term, limit=15):
     async with Session() as s:
         stmt=select(User).order_by(User.created_at.desc()).limit(limit)
         if term:
-            t=f"%{term}%"
-            if term.isdigit(): stmt=stmt.where(or_(User.user_id==int(term), User.username.ilike(t), User.full_name.ilike(t)))
+            clean_term=term.strip().lstrip("@")
+            t=f"%{clean_term}%"
+            if clean_term.isdigit(): stmt=stmt.where(or_(User.user_id==int(clean_term), User.username.ilike(t), User.full_name.ilike(t)))
             else: stmt=stmt.where(or_(User.username.ilike(t), User.full_name.ilike(t)))
         rows=(await s.scalars(stmt)).all()
         return [{"user_id":u.user_id,"username":u.username,"full_name":u.full_name,"wallet_balance":float(u.wallet_balance or 0),"is_banned":u.is_banned,"is_reseller":u.is_reseller,"created_at":u.created_at} for u in rows]
+
+
+async def admin_users_overview():
+    """Registered-user count and lifetime paid product spend (wallet top-ups excluded)."""
+    async with Session() as s:
+        total=int(await s.scalar(select(func.count(User.user_id))) or 0)
+        spent=float(await s.scalar(select(func.coalesce(func.sum(Order.amount_inr),0)).where(
+            Order.status=="PAID", Order.payment_method.notin_(("TOPUP", "FAM_TOPUP"))
+        )) or 0)
+        return {"total_users":total,"total_spent":spent}
+
+
+async def admin_users_page(page=0, page_size=10):
+    """Newest-first registered users page; page is zero-based."""
+    page=max(0,int(page)); page_size=max(1,min(20,int(page_size)))
+    async with Session() as s:
+        rows=(await s.scalars(select(User).order_by(User.created_at.desc(),User.user_id.desc()).offset(page*page_size).limit(page_size))).all()
+        return [{"user_id":u.user_id,"username":u.username,"full_name":u.full_name,
+                 "wallet_balance":float(u.wallet_balance or 0),"is_banned":u.is_banned,
+                 "is_reseller":u.is_reseller,"created_at":u.created_at} for u in rows]
 
 async def admin_user(user_id):
     async with Session() as s:
@@ -996,9 +988,15 @@ async def wallet_history(user_id, limit=10):
         return [{"amount":float(x.amount),"kind":x.kind,"note":x.note,"created_at":x.created_at} for x in rows]
 
 async def admin_orders(limit=20):
+    """Return only successfully paid orders, newest successful payment first."""
     async with Session() as s:
-        rows=(await s.scalars(select(Order).order_by(Order.created_at.desc()).limit(limit))).all()
-        return [{"order_id":o.order_id,"user_id":o.user_id,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"created_at":o.created_at} for o in rows]
+        rows=(await s.scalars(
+            select(Order)
+            .where(Order.status == "PAID")
+            .order_by(Order.paid_at.desc().nullslast(), Order.created_at.desc())
+            .limit(max(1, min(int(limit), 100)))
+        )).all()
+        return [{"order_id":o.order_id,"user_id":o.user_id,"amount_inr":float(o.amount_inr),"status":o.status,"payment_method":o.payment_method,"created_at":o.created_at,"paid_at":o.paid_at,"product_id":o.product_id,"plan_id":o.plan_id,"duration":o.duration,"quantity":o.quantity} for o in rows]
 
 async def admin_stock_summary():
     async with Session() as s:

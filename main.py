@@ -14,7 +14,7 @@ from config import BOT_TOKEN, ADMIN_IDS, PUBLIC_BASE_URL, FAMGATEWAY_API_KEY
 from db import (init_db, close_db, is_user_banned, get_or_create_user, list_categories, list_products, get_product, get_plan,
                 create_order, get_order, fulfill_paid_order, credit_wallet_for_no_stock, add_product, add_plan, add_stock, create_topup_order, fulfill_wallet_topup, set_famgateway_order_id, get_order_by_famgateway_id,
                 list_orders, get_user, pay_wallet, set_payment_link, expire_order, dashboard_stats, search_users,
-                admin_user, set_banned, adjust_wallet, wallet_history, admin_orders, admin_stock_summary,
+                admin_orders as db_admin_orders, admin_user, admin_users_overview, admin_users_page, set_banned, adjust_wallet, wallet_history, admin_stock_summary,
                 set_reseller, set_reseller_pricing, edit_product, deactivate_product, create_coupon, set_user_phone,
                 set_bot_setting, get_bot_settings, recent_admin_logs, admin_log, record_refund, refund_history, list_keys, user_order_stats, list_resellers, list_coupons, update_coupon, delete_coupon, set_product_maintenance, find_duplicate_stock_keys, remove_stock_key, delete_category_admin, delete_product_admin,
                 attach_referrer, award_referral_after_purchase, referral_stats, claim_referral_reward, add_referral_stock, health_check, admin_all_products, admin_all_plans, edit_plan_admin, deactivate_plan_admin, add_or_update_customer_plan, update_reseller_price_by_duration, bulk_customer_plan_prices, bulk_reseller_plan_prices, rename_category_admin, category_products_admin, create_category_admin, add_plans_bulk, payment_reconciliation, search_catalog, list_games, create_game, rename_game, archive_game)
@@ -158,6 +158,45 @@ async def recover_famgateway_orders_on_startup():
         log.exception("FamGateway startup payment recovery failed")
 
 
+SETTING_DEFAULTS = {
+    "store_enabled": "ON", "maintenance_mode": "OFF", "purchase_enabled": "ON",
+    "customer_access": "ON", "reseller_access": "ON", "support_username": "@subro98",
+    "welcome_message": "", "min_topup": "10",
+}
+
+async def setting_value(key):
+    values=await get_bot_settings()
+    return str(values.get(key, SETTING_DEFAULTS.get(key, "")))
+
+async def setting_enabled(key):
+    return (await setting_value(key)).strip().upper() in {"ON", "YES", "TRUE", "1", "ENABLED"}
+
+async def render_settings(target):
+    values=await get_bot_settings()
+    def val(k): return str(values.get(k, SETTING_DEFAULTS[k]))
+    rows=[
+        [InlineKeyboardButton(text=f"🏪 Store: {'ON' if val('store_enabled').upper()=='ON' else 'OFF'}",callback_data="setting:toggle:store_enabled",style="success" if val('store_enabled').upper()=='ON' else "danger")],
+        [InlineKeyboardButton(text=f"🛠️ Maintenance: {'ON' if val('maintenance_mode').upper()=='ON' else 'OFF'}",callback_data="setting:toggle:maintenance_mode",style="danger" if val('maintenance_mode').upper()=='ON' else "success")],
+        [InlineKeyboardButton(text=f"🛒 Purchases: {'ON' if val('purchase_enabled').upper()=='ON' else 'OFF'}",callback_data="setting:toggle:purchase_enabled",style="success" if val('purchase_enabled').upper()=='ON' else "danger")],
+        [InlineKeyboardButton(text=f"👤 Customer access: {'ON' if val('customer_access').upper()=='ON' else 'OFF'}",callback_data="setting:toggle:customer_access",style="success" if val('customer_access').upper()=='ON' else "danger")],
+        [InlineKeyboardButton(text=f"👑 Reseller access: {'ON' if val('reseller_access').upper()=='ON' else 'OFF'}",callback_data="setting:toggle:reseller_access",style="success" if val('reseller_access').upper()=='ON' else "danger")],
+        [InlineKeyboardButton(text=f"🎧 Support: {val('support_username')[:24]}",callback_data="setting:editvalue:support_username",style="primary")],
+        [InlineKeyboardButton(text="✏️ Welcome message",callback_data="setting:editvalue:welcome_message",style="primary")],
+        [InlineKeyboardButton(text=f"💰 Minimum top-up: ₹{val('min_topup')}",callback_data="setting:editvalue:min_topup",style="primary")],
+        [InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:settings",style="primary")],
+        [InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin",style="primary")],
+    ]
+    await target.edit_text("⚙️ <b>BOT SETTINGS</b>\n\nTap a button to switch a feature ON/OFF or edit its value. Changes are saved immediately.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+async def setting_access_message(user_id):
+    user=await get_user(user_id)
+    reseller=bool(user and user.get("is_reseller"))
+    if not await setting_enabled("store_enabled"): return "🏪 The store is temporarily closed. Please try again later."
+    if await setting_enabled("maintenance_mode"): return "🛠️ The store is under maintenance. Please try again later."
+    if not await setting_enabled("reseller_access" if reseller else "customer_access"):
+        return "Access is temporarily disabled for your account type. Please contact support."
+    return None
+
 def admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Dashboard",callback_data="adm:dashboard", style="primary"),InlineKeyboardButton(text="👥 Users",callback_data="adm:users", style="primary")],
@@ -189,8 +228,10 @@ def main_keyboard(is_reseller=False):
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def store_welcome(name="Customer"):
+def store_welcome(name="Customer", custom_message=None):
     safe=html.escape(name or "Customer")
+    if custom_message:
+        return html.escape(str(custom_message))
     return ("🏪 ━━ Panel Army Store ━━ 🏪\n\n" f"👋 Welcome, {safe}!\n\n"
             "⭐ ━ STORE HIGHLIGHTS ━ ⭐\n\n│ 🔑 Premium Game Keys\n│ ⚡ Instant Delivery 24/7\n│ 🔒 100% Secure Payment\n│ 💰 Best Prices Guaranteed\n│ 🎁 Referral Rewards\n│ 📞 Professional Support\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🚀 Tap Shop Now to Start!")
 
@@ -210,11 +251,13 @@ def quantity_payment_keyboard(plan_id, quantity, amount, balance, product_id=Non
         [InlineKeyboardButton(text="📦 Bulk Purchase",callback_data=f"bulk:{plan_id}", style="success")],
         [InlineKeyboardButton(text="🔙 Back",callback_data=f"product:{product_id or plan_id}", style="primary")]])
 
-def topup_amount_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="₹10",callback_data="topup:10", style="primary"),InlineKeyboardButton(text="₹20",callback_data="topup:20", style="primary"),InlineKeyboardButton(text="₹50",callback_data="topup:50", style="primary")],
-        [InlineKeyboardButton(text="₹100",callback_data="topup:100", style="primary"),InlineKeyboardButton(text="✍️ Custom Amount",callback_data="topup:custom", style="primary")],
-        [InlineKeyboardButton(text="🔙 Dashboard",callback_data="home", style="primary")]])
+def topup_amount_keyboard(minimum=10):
+    amounts=sorted({float(x) for x in (10,20,50,100) if float(x)>=minimum} | {float(minimum)})[:4]
+    buttons=[InlineKeyboardButton(text=f"₹{amount:g}",callback_data=f"topup:{amount:g}",style="primary") for amount in amounts]
+    rows=[buttons[i:i+2] for i in range(0,len(buttons),2)]
+    rows.append([InlineKeyboardButton(text="✍️ Custom Amount",callback_data="topup:custom",style="primary")])
+    rows.append([InlineKeyboardButton(text="🔙 Dashboard",callback_data="home",style="primary")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def game_hash(name):
     return hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
@@ -238,26 +281,35 @@ def product_keyboard(products):
     rows.append([InlineKeyboardButton(text="🔙 All Categories",callback_data="shop", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def _format_price(value):
+    try:
+        amount=float(value or 0)
+    except (TypeError, ValueError):
+        amount=0.0
+    return f"₹{amount:.2f}" if amount>0 else "Not Set"
+
+def _role_price(plan, reseller):
+    """Return the price for the viewer's role; zero means not configured."""
+    value = plan.get("reseller_price_inr") if reseller else plan.get("price_inr")
+    try:
+        value = float(value or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return value if value > 0 else None
+
 def price_details(p,user):
     reseller=bool(user and user['is_reseller'])
-    shown_inr=p['reseller_price_inr'] if reseller else p['price_inr']
+    value=_role_price(p,reseller)
     price_label="👑 Reseller Price" if reseller else "🏷️ Price"
-    lines=[f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>","━━━━━━━━━━━━━━━━━━",
-           "⚡ <b>PLAN DETAILS:</b>",
-           f"🔹 {html.escape(p['duration'])}",
-           
-           f"{price_label}: ₹{shown_inr:.2f}",
-           "━━━━━━━━━━━━━━━━━━","🎯 Select your plan below:"]
-    return "\n".join(lines)
+    price_text=f"₹{value:.2f}" if value is not None else "Not Set"
+    return "\n".join([f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>","━━━━━━━━━━━━━━━━━━","⚡ <b>PLAN DETAILS:</b>",f"🔹 {html.escape(p['duration'])}",f"{price_label}: {price_text}","━━━━━━━━━━━━━━━━━━","🎯 Select your plan below:"])
 
 def plan_keyboard(product,user=None):
     reseller=bool(user and user["is_reseller"])
     rows=[]
     for plan in product['plans']:
-        if reseller and float(plan.get('reseller_price_inr') or 0) <= 0:
-            continue
-        shown_inr=plan['reseller_price_inr'] if reseller else plan['price_inr']
-        label=f"🔑 [{plan['duration']}] » ₹{shown_inr:.2f}"
+        value=_role_price(plan,reseller)
+        label=f"🔑 [{plan['duration']}] » {f'₹{value:.2f}' if value is not None else 'Not Set'}"
         rows.append([InlineKeyboardButton(text=label,callback_data=f"plan:{plan['id']}", style="primary")])
     rows.append([InlineKeyboardButton(text="🔙 Back to Shop",callback_data="shop", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -347,7 +399,7 @@ async def start(message:Message,state:FSMContext):
         await message.answer(verification_text,reply_markup=kb)
         return
     await state.clear()
-    await message.answer(store_welcome(message.from_user.first_name),reply_markup=main_keyboard(bool(user and user.get("is_reseller"))))
+    await message.answer(store_welcome(message.from_user.first_name, await setting_value("welcome_message")),reply_markup=main_keyboard(bool(user and user.get("is_reseller"))))
 
 @dp.message(ContactState.waiting_contact,F.contact)
 async def save_start_contact(message:Message,state:FSMContext):
@@ -364,15 +416,19 @@ async def save_start_contact(message:Message,state:FSMContext):
     await state.clear()
     await message.answer("🛡️ <b>Identity Confirmed Successfully!</b>\n\n✅ Your phone number has been verified.\n🔒 Your account is now protected.\n⚡ You can now shop and receive instant key delivery.",reply_markup=ReplyKeyboardRemove())
     user=await get_user(message.from_user.id)
-    await message.answer(store_welcome(message.from_user.first_name),reply_markup=main_keyboard(bool(user and user.get("is_reseller"))))
+    await message.answer(store_welcome(message.from_user.first_name, await setting_value("welcome_message")),reply_markup=main_keyboard(bool(user and user.get("is_reseller"))))
 
 @dp.callback_query(F.data.in_({"shop","store"}))
 async def shop(call:CallbackQuery):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked: await callback_answer(call,blocked,show_alert=True); return
     await call.message.edit_text("🎮 <b>— CHOOSE A GAME —</b>\n\nSelect the game you want to shop for:",reply_markup=game_keyboard(await list_games()))
     await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("game:"))
 async def customer_choose_game(call:CallbackQuery):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked: await callback_answer(call,blocked,show_alert=True); return
     token=call.data.rsplit(":",1)[1]
     game=next((g for g in await list_games() if game_hash(g)==token),None)
     if not game:
@@ -386,6 +442,8 @@ async def customer_choose_game(call:CallbackQuery):
 
 @dp.callback_query(F.data.startswith("category:"))
 async def category(call:CallbackQuery):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked: await callback_answer(call,blocked,show_alert=True); return
     parts=call.data.split(":")
     game=next((g for g in await list_games() if len(parts)==3 and game_hash(g)==parts[1]),None)
     category_hash=parts[2] if len(parts)==3 else (parts[1] if len(parts)>1 else "")
@@ -407,6 +465,8 @@ async def category(call:CallbackQuery):
 
 @dp.callback_query(F.data.startswith("product:"))
 async def product_view(call:CallbackQuery):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked: await callback_answer(call,blocked,show_alert=True); return
     product_id=int(call.data.split(":",1)[1]);p=await get_product(product_id)
     if not p:
         await callback_answer(call, "Product not found.",show_alert=True);return
@@ -414,19 +474,14 @@ async def product_view(call:CallbackQuery):
         await call.message.edit_text(f"🛠️ <b>{html.escape(p['name'])} is under maintenance.</b>\nPlease check back later.",reply_markup=home_keyboard()); return
     user=await get_user(call.from_user.id)
     reseller=bool(user and user['is_reseller'])
+    visible_plans=p['plans']
     lines=[f"🏪 <b>PANEL ARMY</b>",f"🎮 <b>{html.escape(p['name'])}</b>","━━━━━━━━━━━━━━━━━━","⚡ <b>AVAILABLE PLANS:</b>"]
-    for pl in p['plans']:
-        customer_price=float(pl['price_inr'])
+    for pl in visible_plans:
+        own_price=_role_price(pl,reseller)
+        price_text=f"₹{own_price:.2f}" if own_price is not None else "Not Set"
         status="✅ Online"
-        lines.extend([
-            f"\n┌ 🔹 {html.escape(pl['duration'])}",
-            f"│ 📊 Status: {status}",
-            f"{'│' if reseller else '└'} 🏷️ Price: ₹{customer_price:.2f}",
-        ])
-        if reseller:
-            reseller_price=float(pl['reseller_price_inr'])
-            savings=max(0.0,customer_price-reseller_price)
-            lines.append(f"└ 👑 Reseller: ₹{reseller_price:.2f} (Save ₹{savings:.2f})")
+        lines.extend([f"\n┌ 🔹 {html.escape(pl['duration'])}",f"│ 📊 Status: {status}"])
+        lines.append(("└ 👑 Reseller: " if reseller else "└ 🏷️ Price: ")+price_text)
     lines.extend(["━━━━━━━━━━━━━━━━━━","🎯 Select your plan below:"])
     await call.message.edit_text("\n".join(lines),reply_markup=plan_keyboard(p,user));await callback_answer(call, )
 
@@ -435,24 +490,27 @@ async def outstock(call:CallbackQuery):await callback_answer(call, "Please reope
 
 @dp.callback_query(F.data.startswith("plan:"))
 async def plan_view(call:CallbackQuery):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked: await callback_answer(call,blocked,show_alert=True); return
+    if not await setting_enabled("purchase_enabled"): await callback_answer(call,"Purchases are temporarily disabled.",show_alert=True); return
     plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
     if not p:await callback_answer(call, "This plan is unavailable.",show_alert=True);return
     if p.get("maintenance"):
         await call.message.edit_text(f"🛠️ <b>{html.escape(p['product_name'])} is under maintenance.</b>\nPlease check back later.",reply_markup=home_keyboard()); return
     u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller'])
-    if reseller and float(p.get('reseller_price_inr') or 0) <= 0:
-        await callback_answer(call, "Reseller price is not set for this plan. Contact admin.", show_alert=True); return
-    unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit,2)
+    own_price=_role_price(p,reseller)
+    if own_price is None:
+        await callback_answer(call, "Price is Not Set for your account type.", show_alert=True); return
+    amount=round(own_price,2)
     status="✅ Online"
-    if reseller:
-        savings=max(0.0,p['price_inr']-p['reseller_price_inr'])
-        plan_card=(f"┌ 🔹 {html.escape(p['duration'])}\n│ 📊 Status: {status}\n│ 🏷️ Price: ₹{p['price_inr']:.2f}\n└ 👑 Reseller: ₹{p['reseller_price_inr']:.2f} (Save ₹{savings:.2f})")
-    else:
-        plan_card=(f"┌ 🔹 {html.escape(p['duration'])}\n│ 📊 Status: {status}\n└ 🏷️ Price: ₹{p['price_inr']:.2f}")
+    label="👑 Reseller" if reseller else "🏷️ Price"
+    plan_card=(f"┌ 🔹 {html.escape(p['duration'])}\n│ 📊 Status: {status}\n└ {label}: ₹{own_price:.2f}")
     await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])}</b>\n━━━━━━━━━━━━━━━━━━\n{plan_card}\n\n📦 Quantity: <b>1 key</b>\n💰 Your total: <b>₹{amount:.2f}</b>\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose a payment method:",reply_markup=quantity_payment_keyboard(plan_id,1,amount,u['wallet_balance'] if u else 0,p['product_id']));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("bulk:"))
 async def bulk_purchase_menu(call:CallbackQuery):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked or not await setting_enabled("purchase_enabled"): await callback_answer(call,blocked or "Purchases are temporarily disabled.",show_alert=True); return
     plan_id=int(call.data.split(":",1)[1]);p=await get_plan(plan_id)
     if not p:
         await callback_answer(call, "This plan is unavailable.",show_alert=True);return
@@ -466,7 +524,9 @@ async def quantity_pick(call:CallbackQuery):
     _,pid_s,qty_s=call.data.split(":");plan_id=int(pid_s);quantity=int(qty_s);p=await get_plan(plan_id)
     if not p or quantity<1 or quantity>100:await callback_answer(call, "Please choose a quantity from 1 to 100.",show_alert=True);return
     if p.get("maintenance"): await callback_answer(call, f"{p['product_name']} is under maintenance.",show_alert=True); return
-    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=p['reseller_price_inr'] if reseller else p['price_inr'];amount=round(unit*quantity,2)
+    u=await get_user(call.from_user.id);reseller=bool(u and u['is_reseller']);unit=_role_price(p,reseller)
+    if unit is None: await callback_answer(call, "Price is Not Set for your account type.", show_alert=True); return
+    amount=round(unit*quantity,2)
     await call.message.edit_text(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n━━━━━━━━━━━━━━━━━━\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ₹{amount:.2f}\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0,p['product_id']));await callback_answer(call, )
 
 @dp.callback_query(F.data.startswith("qtycustom:"))
@@ -482,7 +542,9 @@ async def quantity_custom_received(message:Message,state:FSMContext):
         await message.answer("Please choose a valid quantity between 1 and 100.");return
     if p.get("maintenance"):
         await message.answer(f"🛠️ {html.escape(p['product_name'])} is under maintenance. Please check back later."); return
-    u=await get_user(message.from_user.id);unit=p['reseller_price_inr'] if u and u['is_reseller'] else p['price_inr'];amount=round(unit*quantity,2)
+    u=await get_user(message.from_user.id);unit=_role_price(p,bool(u and u['is_reseller']))
+    if unit is None: await message.answer('Price is Not Set for your account type.'); return
+    amount=round(unit*quantity,2)
     await message.answer(f"🎮 <b>{html.escape(p['product_name'])} — {html.escape(p['duration'])}</b>\n📦 Quantity: <b>{quantity}</b>\n💰 Total: ₹{amount:.2f}\n👛 Wallet: ₹{(u['wallet_balance'] if u else 0):.2f}\n\nChoose payment method:",reply_markup=quantity_payment_keyboard(plan_id,quantity,amount,u['wallet_balance'] if u else 0,p['product_id']))
 
 def no_stock_refund_message(amount):
@@ -506,6 +568,8 @@ _wallet_purchase_locks = {}
 
 @dp.callback_query(F.data.startswith("wallet:"))
 async def wallet_pay(call:CallbackQuery):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked or not await setting_enabled("purchase_enabled"): await callback_answer(call,blocked or "Purchases are temporarily disabled.",show_alert=True); return
     parts=call.data.split(":");plan_id=int(parts[1]);quantity=int(parts[2]) if len(parts)>2 else 1
     lock=_wallet_purchase_locks.setdefault(call.from_user.id, asyncio.Lock())
     if lock.locked():
@@ -538,6 +602,8 @@ async def wallet_pay(call:CallbackQuery):
 
 @dp.callback_query(F.data.startswith("upi:"))
 async def upi_begin(call:CallbackQuery,state:FSMContext):
+    blocked=await setting_access_message(call.from_user.id)
+    if blocked or not await setting_enabled("purchase_enabled"): await callback_answer(call,blocked or "Purchases are temporarily disabled.",show_alert=True); return
     await callback_answer(call, "Creating your UPI QR…")
     progress = await call.message.answer("⏳ Preparing your payment QR…\nPlease wait a moment.")
     parts=call.data.split(":");plan_id=int(parts[1]);quantity=int(parts[2]) if len(parts)>2 else 1
@@ -552,7 +618,10 @@ async def upi_begin(call:CallbackQuery,state:FSMContext):
     if not user or not user.get("phone"):
         await progress.edit_text("Please restart the bot and share your phone number first.");return
     is_reseller=bool(user and user['is_reseller'])
-    unit=p['reseller_price_inr'] if is_reseller else p['price_inr']
+    unit=_role_price(p,is_reseller)
+    if unit is None:
+        await progress.edit_text('❌ Price is Not Set for your account type.')
+        return
     amount=round(unit*quantity,2)
     order=await create_order(call.from_user.id,plan_id,amount,quantity,"FAM")
     try:
@@ -607,7 +676,7 @@ async def orders_cb(call:CallbackQuery):
         chunks=["🛍️ ━━ MY ORDERS ━━ 🛍️\n"]
         for o in rows[:10]:
             key=html.escape(o.get('key_text') or "")
-            dt=o['created_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('created_at') else "—"
+            dt=o['paid_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('paid_at') else (o['created_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('created_at') else "—")
             chunks.append(f"🎮 <b>{html.escape(o['product_name'])}</b>\n   ⏳ {html.escape(o['duration'])}\n   🔑 <code>{key}</code>\n   💰 ₹{o['amount_inr']:.2f} │ 📅 {dt}\n   📌 Status: {html.escape(o['status'])}\n━━━━━━━━━━━━━━━━━━━━━━")
         msg="\n".join(chunks)
     await call.message.edit_text(msg,reply_markup=home_keyboard());await callback_answer(call, )
@@ -623,19 +692,21 @@ async def profile(call:CallbackQuery):
 @dp.callback_query(F.data=="balance")
 async def balance_menu(call:CallbackQuery):
     u=await get_user(call.from_user.id);balance=u['wallet_balance'] if u else 0
-    msg=("💰 ━━ ADD BALANCE ━━ 💰\n\n" f"💳 Current Balance: ₹{balance:.2f}\n\n━━━━━━━━━━━━━━━━━━━━━━\n💳 Available Payment Methods:\n  🇮🇳 Paytm/UPI (INR)\n\n✅ Use balance for purchases!\n━━━━━━━━━━━━━━━━━━━━━━\n\nSelect amount to deposit.\nYou'll choose your payment method next:\n\nMinimum deposit: ₹10")
-    await call.message.edit_text(msg,reply_markup=topup_amount_keyboard());await callback_answer(call, )
+    minimum=float(await setting_value("min_topup"))
+    msg=("💰 ━━ ADD BALANCE ━━ 💰\n\n" f"💳 Current Balance: ₹{balance:.2f}\n\n━━━━━━━━━━━━━━━━━━━━━━\n💳 Available Payment Methods:\n  🇮🇳 Paytm/UPI (INR)\n\n✅ Use balance for purchases!\n━━━━━━━━━━━━━━━━━━━━━━\n\nSelect amount to deposit.\nYou'll choose your payment method next:\n\nMinimum deposit: ₹{minimum:g}")
+    await call.message.edit_text(msg,reply_markup=topup_amount_keyboard(minimum));await callback_answer(call, )
 
 @dp.callback_query(F.data=="topup:custom")
 async def topup_custom(call:CallbackQuery,state:FSMContext):
-    await state.set_state(CheckoutState.custom_topup);await call.message.answer("Enter the amount to add. Minimum ₹10.");await callback_answer(call, )
+    await state.set_state(CheckoutState.custom_topup);await call.message.answer(f"Enter the amount to add. Minimum ₹{float(await setting_value('min_topup')):g}.");await callback_answer(call, )
 
 @dp.message(CheckoutState.custom_topup)
 async def topup_custom_received(message:Message,state:FSMContext):
     try:amount=round(float(message.text.strip()),2)
     except Exception:await message.answer("Enter a valid amount, for example 150.");return
     await state.clear()
-    if amount<10 or amount>50000:await message.answer("Minimum top-up is ₹10. Maximum is ₹50,000.");return
+    minimum=float(await setting_value("min_topup"))
+    if amount<minimum or amount>50000:await message.answer(f"Minimum top-up is ₹{minimum:g}. Maximum is ₹50,000.");return
     await show_topup_method(message,amount)
 
 async def show_topup_method(target,amount):
@@ -643,6 +714,8 @@ async def show_topup_method(target,amount):
     await target.answer(f"💰 Deposit amount: <b>₹{amount:.2f}</b>\n\nSelect your payment method:",reply_markup=kb)
 
 async def start_topup_payment(message:Message,amount:float,user_id=None,customer_name=None):
+    minimum=float(await setting_value("min_topup"))
+    if amount<minimum: await message.answer(f"Minimum top-up is ₹{minimum:g}."); return
     user_id=user_id or message.from_user.id;customer_name=customer_name or message.from_user.full_name or "Customer"
     u=await get_user(user_id)
     if not u or not u.get('phone'):await message.answer("Please verify your phone number with /start before adding balance.");return
@@ -667,7 +740,8 @@ async def start_topup_payment(message:Message,amount:float,user_id=None,customer
 @dp.callback_query(F.data.startswith("topup:"))
 async def topup_fixed(call:CallbackQuery):
     amount=float(call.data.split(":",1)[1])
-    if amount<10:await callback_answer(call, "Minimum top-up is ₹10.",show_alert=True);return
+    minimum=float(await setting_value("min_topup"))
+    if amount<minimum:await callback_answer(call, f"Minimum top-up is ₹{minimum:g}.",show_alert=True);return
     await show_topup_method(call.message,amount)
     await callback_answer(call, )
 
@@ -711,17 +785,26 @@ async def menu_stub(call:CallbackQuery):
         if not user or not user.get("is_reseller"):
             await callback_answer(call, "Reseller access is not enabled for your account.", show_alert=True)
             return
-    if call.data=="support":msg="🎫 ━━ SUPPORT CENTER ━━ 🎫\n━━━━━━━━━━━━━━━━━━━━━━\n\nNeed help? We're here for you! 💬\nContact with @subro98\n━━━━━━━━━━━━━━━━━━━━━"
+    if call.data=="support":msg="🎫 ━━ SUPPORT CENTER ━━ 🎫\n━━━━━━━━━━━━━━━━━━━━━━\n\nNeed help? We're here for you! 💬\nContact with "+html.escape(await setting_value("support_username"))+"\n━━━━━━━━━━━━━━━━━━━━━"
     elif call.data=="downloads":
         msg="📥 <b>DOWNLOAD FILES</b>\n\nJoin our official channel to access available files and updates."
         kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Open Download Channel",url="https://t.me/+pHRtVzRkKm8xMTdl",style="success")],[InlineKeyboardButton(text="🔙 Back",callback_data="home",style="primary")]])
         await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call);return
-    else:msg={"spin":"🎰 Lucky Spin will be available soon.","reseller":"⚡ Contact support to activate reseller access.","howto":"📺 How-to guides will be available soon.","help":"Contact support at @subro98 for order and delivery help."}[call.data]
+    elif call.data=="howto":
+        msg=("📺 <b>HOW TO USE PANEL ARMY</b>\n\n"
+             "Join our official channel for how-to guides, tutorials, and important updates.\n\n"
+             "Tap the button below to join.")
+        kb=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Join Official Channel",url="https://t.me/+X8czS0EDvclmMzY1",style="success")],
+            [InlineKeyboardButton(text="🔙 Back",callback_data="home",style="primary")]
+        ])
+        await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call);return
+    else:msg={"spin":"🎰 Lucky Spin will be available soon.","reseller":"⚡ Contact support to activate reseller access.","help":"Contact support at "+html.escape(await setting_value("support_username"))+" for order and delivery help."}[call.data]
     await call.message.edit_text(msg,reply_markup=home_keyboard());await callback_answer(call, )
 
 @dp.callback_query(F.data=="home")
 async def home(call:CallbackQuery):
-    u=await get_user(call.from_user.id);await call.message.edit_text(store_welcome(u.get('full_name') if u else call.from_user.first_name),reply_markup=main_keyboard(bool(u and u.get("is_reseller"))));await callback_answer(call, )
+    u=await get_user(call.from_user.id);await call.message.edit_text(store_welcome(u.get('full_name') if u else call.from_user.first_name, await setting_value("welcome_message")),reply_markup=main_keyboard(bool(u and u.get("is_reseller"))));await callback_answer(call, )
 
 @dp.message(Command("admin"))
 async def admin_help(message:Message):
@@ -737,8 +820,13 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         d=await dashboard_stats()
         msg=("📊 <b>Dashboard</b>\n\n" f"👥 Customers & users: {d['users']}\n👑 Resellers: {d['resellers']}\n📦 Orders: {d['orders']}\n✅ Paid orders: {d['paid']}\n⏳ Pending / review: {d['pending']}\n💰 Lifetime revenue: ₹{d['revenue']:.2f}\n📅 Today: ₹{d['today_revenue']:.2f} ({d['today_orders']} sales)\n🔑 Available keys: {d['stock']}\n📤 Sold keys: {d['sold_stock']}")
     elif section=="users":
-        await state.set_state(AdminState.search_user)
-        msg="👥 <b>User management</b>\nSend a Telegram ID, username, or name to search. Use /cancel to stop."
+        kb=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔎 Search User",callback_data="admusers:search",style="primary")],
+            [InlineKeyboardButton(text="👥 Show All Users",callback_data="admusers:all:0",style="success")],
+            [InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin",style="primary")]
+        ] + admin_nav_rows())
+        await call.message.edit_text("👥 <b>USER MANAGEMENT</b>\n\nSearch a user by Telegram ID, username or name, or browse all registered users with spending statistics.",reply_markup=kb)
+        await callback_answer(call);return
     elif section=="wallet":
         await state.set_state(AdminState.admin_input);await state.update_data(admin_action="wallet")
         msg="💰 <b>Wallet control</b>\nSend <code>USER_ID | AMOUNT</code>. Use a positive amount to credit and a negative amount to deduct."
@@ -756,12 +844,19 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         ] + admin_nav_rows())
         await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, );return
     elif section=="payments":
-        rows=await admin_orders(20)
-        recon=await payment_reconciliation(100)
-        msg="💳 <b>PAYMENTS & ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nSelect an order to inspect its payment details.\n\n"+("\n".join(f"• <b>{o['order_id']}</b> · {o['status']} · ₹{o['amount_inr']:.2f}" for o in rows) if rows else "No payment/order records found.")
-        pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}", style="primary")] for o in rows]
-        pay_rows += [[InlineKeyboardButton(text=f"🧭 Reconciliation ({len(recon)} pending/review)",callback_data="admpay:reconcile",style="success")],[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
-        await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows));await callback_answer(call, );return
+        # A database/provider error must never leave the admin with a blank screen.
+        try:
+            rows=await db_admin_orders(20)
+            msg="💳 <b>SUCCESSFUL PAYMENTS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nShowing the 20 most recent successful payments.\nSelect a payment to inspect its details.\n\n"+("\n".join(f"• <b>{html.escape(str(o['order_id']))}</b> · ₹{o['amount_inr']:.2f} · {o['paid_at'].strftime('%d %b %Y, %H:%M') if o.get('paid_at') else 'Paid date unavailable'}" for o in rows) if rows else "No successful payments found yet.")
+            pay_rows=[[InlineKeyboardButton(text=f"✅ {str(o['order_id'])[:30]} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}", style="success")] for o in rows]
+            pay_rows += [[InlineKeyboardButton(text="🧭 Payment Reconciliation",callback_data="admpay:reconcile",style="primary")],[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
+            await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows))
+        except Exception:
+            log.exception("Admin Payments screen failed to load")
+            kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Try Again",callback_data="adm:payments",style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin",style="primary")]])
+            try: await call.message.edit_text("⚠️ <b>Payments could not be loaded.</b>\n\nThe database query failed. Please tap Try Again; if it continues, check the bot logs.",reply_markup=kb)
+            except Exception: await call.message.answer("⚠️ Payments could not be loaded. Please tap Payments again or check the bot logs.",reply_markup=kb)
+        await callback_answer(call);return
     elif section=="resellers":
         rows=await list_resellers(50)
         kb=[[InlineKeyboardButton(text=f"👑 {r['full_name'] or r['user_id']} · {r['user_id']}",callback_data=f"admres:{r['user_id']}:0", style="primary")] for r in rows]
@@ -776,10 +871,8 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
         rows += [[InlineKeyboardButton(text="➕ Create coupon",callback_data="cp:create", style="primary")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:coupons", style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
         await call.message.edit_text("🎟️ <b>COUPON MANAGEMENT</b>\nSelect a coupon to edit, pause or delete.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); await callback_answer(call); return
     elif section=="settings":
-        settings=await get_bot_settings()
-        rows=[[InlineKeyboardButton(text=f"⚙️ {k[:25]}: {v[:20]}",callback_data=f"setting:edit:{k}", style="primary")] for k,v in settings.items()]
-        rows += [[InlineKeyboardButton(text="➕ Add / change setting",callback_data="setting:add", style="primary")],[InlineKeyboardButton(text="🔄 Refresh",callback_data="adm:settings", style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
-        await call.message.edit_text("⚙️ <b>BOT SETTINGS</b>\nSelect a saved setting or add a key/value setting.",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); await callback_answer(call); return
+        await render_settings(call.message)
+        await callback_answer(call); return
     elif section=="logs":
         rows=await recent_admin_logs(20);msg="📜 <b>Recent admin actions</b>\n"+("\n".join(f"{r['created_at']:%Y-%m-%d %H:%M} · {r['admin_id']} · {r['action']} · {html.escape(r['details'][:120])}" for r in rows) if rows else "No admin actions logged yet.")
     else:msg="Unknown section."
@@ -789,20 +882,29 @@ async def admin_menu(call:CallbackQuery,state:FSMContext):
 @dp.callback_query(F.data=="admpay:reconcile")
 async def admin_payment_reconcile(call:CallbackQuery):
     if not is_admin(call.from_user.id):await callback_answer(call,"Admin access required",show_alert=True);return
-    rows=await payment_reconciliation(100)
-    body="\n".join(f"• {r['order_id']} · {r['status']} · ₹{r['amount_inr']:.2f} · {r['created_at'].strftime('%d %b %H:%M')}" for r in rows)
-    await call.message.edit_text("🧭 <b>PAYMENT RECONCILIATION</b>\n\nThese orders require provider-status review; this screen does not mark payments as successful.\n\n"+(body or "No pending/review orders."),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh",callback_data="admpay:reconcile",style="success")],[InlineKeyboardButton(text="🔙 Payments",callback_data="adm:payments",style="primary")]]))
+    try:
+        rows=await payment_reconciliation(100)
+        body="\n".join(f"• {html.escape(str(r['order_id']))} · {html.escape(str(r['status']))} · ₹{r['amount_inr']:.2f} · {r['created_at'].strftime('%d %b %H:%M')}" for r in rows)
+        await call.message.edit_text("🧭 <b>PAYMENT RECONCILIATION</b>\n\nThese orders require provider-status review; this screen does not mark payments as successful.\n\n"+(body or "No pending/review orders."),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh",callback_data="admpay:reconcile",style="success")],[InlineKeyboardButton(text="🔙 Payments",callback_data="adm:payments",style="primary")]]))
+    except Exception:
+        log.exception("Admin payment reconciliation screen failed")
+        await call.message.answer("⚠️ Could not load payment reconciliation. Please try again or check the bot logs.")
     await callback_answer(call)
 
 @dp.callback_query(F.data=="admpay:list")
 async def admin_payments_list(call:CallbackQuery):
     if not is_admin(call.from_user.id):
         await callback_answer(call, "Admin access required",show_alert=True);return
-    rows=await admin_orders(20)
-    msg="💳 <b>PAYMENTS & ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nSelect an order to inspect its payment details.\n\n"+("\n".join(f"• <b>{o['order_id']}</b> · {o['status']} · ₹{o['amount_inr']:.2f}" for o in rows) if rows else "No payment/order records found.")
-    pay_rows=[[InlineKeyboardButton(text=f"{('✅' if o['status']=='PAID' else '⏳' if o['status']=='PENDING' else '❌')} {o['order_id']} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}", style="primary")] for o in rows]
-    pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
-    await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows));await callback_answer(call, "Payments refreshed")
+    try:
+        rows=await db_admin_orders(20)
+        msg="💳 <b>SUCCESSFUL PAYMENTS</b>\n━━━━━━━━━━━━━━━━━━━━━━\nShowing the 20 most recent successful payments.\nSelect a payment to inspect its details.\n\n"+("\n".join(f"• <b>{html.escape(str(o['order_id']))}</b> · ₹{o['amount_inr']:.2f} · {o['paid_at'].strftime('%d %b %Y, %H:%M') if o.get('paid_at') else 'Paid date unavailable'}" for o in rows) if rows else "No successful payments found yet.")
+        pay_rows=[[InlineKeyboardButton(text=f"✅ {str(o['order_id'])[:30]} · ₹{o['amount_inr']:.2f}",callback_data=f"admpay:view:{o['order_id']}", style="success")] for o in rows]
+        pay_rows += [[InlineKeyboardButton(text="🔄 Refresh Payments",callback_data="admpay:list", style="success")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin", style="primary")]] + admin_nav_rows()
+        await call.message.edit_text(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=pay_rows))
+    except Exception:
+        log.exception("Admin payments refresh failed")
+        await call.message.answer("⚠️ Could not refresh payments. Please try again or check the bot logs.")
+    await callback_answer(call, "Payments refreshed")
 
 @dp.callback_query(F.data.startswith("admpay:view:"))
 async def admin_payment_detail(call:CallbackQuery):
@@ -812,14 +914,70 @@ async def admin_payment_detail(call:CallbackQuery):
     o=await get_order(order_id)
     if not o:
         await callback_answer(call, "Order not found",show_alert=True);return
-    dt=o['created_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('created_at') else "—"
+    dt=o['paid_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('paid_at') else (o['created_at'].strftime("%Y-%m-%d %H:%M:%S") if o.get('created_at') else "—")
     msg=("💳 <b>PAYMENT DETAILS</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
          f"🧾 Order: <code>{html.escape(order_id)}</code>\n👤 User ID: <code>{o['user_id']}</code>\n"
          f"💰 Amount: <b>₹{o['amount_inr']:.2f}</b>\n📌 Status: <b>{html.escape(o['status'])}</b>\n"
-         f"🏦 Method: {html.escape(o['payment_method'])}\n📅 Created: {dt}\n"
+         f"🏦 Method: {html.escape(o['payment_method'])}\n📅 Successful payment: {dt}\n"
          f"🔑 Key: <code>{html.escape(o.get('key_text') or 'Not delivered / wallet top-up')}</code>")
     kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh status list",callback_data="admpay:list", style="primary")],[InlineKeyboardButton(text="🔙 Payments",callback_data="adm:payments", style="success")]])
     await call.message.edit_text(msg,reply_markup=kb);await callback_answer(call, )
+
+@dp.callback_query(F.data=="admusers:search")
+async def admin_users_search_start(call:CallbackQuery,state:FSMContext):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin access required",show_alert=True);return
+    await state.set_state(AdminState.search_user)
+    await call.message.answer("🔎 <b>Search User</b>\nSend a Telegram ID, username, or name to search. Use /cancel to stop.")
+    await callback_answer(call)
+
+
+async def show_admin_users_page(message_or_call,page=0):
+    overview=await admin_users_overview()
+    page_size=10
+    total_pages=max(1,(overview["total_users"]+page_size-1)//page_size)
+    page=min(max(0,page),total_pages-1)
+    rows=await admin_users_page(page,page_size)
+    if not rows:
+        body="No registered users found."
+    else:
+        entries=[]
+        start=page*page_size+1
+        for i,u in enumerate(rows,start):
+            name=html.escape((u["full_name"] or "User")[:55])
+            username=("@"+html.escape(u["username"])) if u["username"] else "No username"
+            role="Reseller" if u["is_reseller"] else "Customer"
+            status="BANNED" if u["is_banned"] else "Active"
+            entries.append(f"<b>{i}. {name}</b> · {role} · {status}\n{username} · <code>{u['user_id']}</code> · Wallet ₹{u['wallet_balance']:.2f}")
+        body="\n\n".join(entries)
+    msg=("👥 <b>ALL USERS</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+         f"👤 Total registered users: <b>{overview['total_users']}</b>\n"
+         f"💰 Total paid product spend: <b>₹{overview['total_spent']:.2f}</b>\n"
+         f"📄 Page: <b>{page+1}/{total_pages}</b>\n━━━━━━━━━━━━━━━━━━━━\n\n{body}\n\nTap a user below to view full details.")
+    buttons=[[InlineKeyboardButton(text=f"{('👑' if u['is_reseller'] else '👤')} {str(u['full_name'] or u['user_id'])[:24]} · {u['user_id']}",callback_data=f"admuser:{u['user_id']}",style="primary")] for u in rows]
+    nav=[]
+    if page>0: nav.append(InlineKeyboardButton(text="⬅ Previous",callback_data=f"admusers:all:{page-1}"))
+    if page+1<total_pages: nav.append(InlineKeyboardButton(text="Next ➡",callback_data=f"admusers:all:{page+1}"))
+    if nav: buttons.append(nav)
+    buttons += [[InlineKeyboardButton(text="🔄 Refresh",callback_data=f"admusers:all:{page}"),InlineKeyboardButton(text="🔎 Search",callback_data="admusers:search")],
+                [InlineKeyboardButton(text="🔙 User Management",callback_data="adm:users"),InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin")]]
+    markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    if isinstance(message_or_call,CallbackQuery):
+        await message_or_call.message.edit_text(msg,reply_markup=markup)
+        await callback_answer(message_or_call)
+    else:
+        await message_or_call.answer(msg,reply_markup=markup)
+
+
+@dp.callback_query(F.data.startswith("admusers:all:"))
+async def admin_users_all_page(call:CallbackQuery):
+    if not is_admin(call.from_user.id): await callback_answer(call,"Admin access required",show_alert=True);return
+    try:
+        page=int(call.data.rsplit(":",1)[1])
+        await show_admin_users_page(call,page)
+    except Exception:
+        log.exception("Admin all-users page failed")
+        await callback_answer(call,"Could not load users. Please try again.",show_alert=True)
+
 
 @dp.message(AdminState.search_user,F.text)
 async def admin_user_search(message:Message,state:FSMContext):
@@ -1036,7 +1194,7 @@ async def ac_product_detail(call:CallbackQuery):
     pid=int(call.data.rsplit(":",1)[1]);p=await get_product(pid)
     if not p:await callback_answer(call, "Product not found or inactive",show_alert=True);return
     plans=await admin_all_plans(pid)
-    rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}", style="primary")] for pl in plans]
+    rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · {_format_price(pl['price_inr'])}",callback_data=f"ac:plan:{pl['id']}", style="primary")] for pl in plans]
     rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}", style="primary")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}", style="primary"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}", style="primary")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}", style="primary")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}", style="danger")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}", style="primary")]] + admin_nav_rows()
     await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nCategory: {html.escape(p['category'])}\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nChoose a plan or action:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await callback_answer(call, )
 
@@ -1056,7 +1214,7 @@ async def ac_product_maintenance(call:CallbackQuery):
     p=await get_product(pid)
     if p:
         plans=await admin_all_plans(pid)
-        rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · ₹{pl['price_inr']:.2f}",callback_data=f"ac:plan:{pl['id']}", style="primary")] for pl in plans]
+        rows=[[InlineKeyboardButton(text=f"🗓️ {pl['duration']} · {_format_price(pl['price_inr'])}",callback_data=f"ac:plan:{pl['id']}", style="primary")] for pl in plans]
         rows += [[InlineKeyboardButton(text=("🟢 Disable maintenance" if p.get("maintenance") else "🛠️ Put under maintenance"),callback_data=f"ac:maintenance:{pid}:{0 if p.get('maintenance') else 1}", style="primary")],[InlineKeyboardButton(text="✏️ Edit name",callback_data=f"ac:editname:{pid}", style="primary"),InlineKeyboardButton(text="📁 Change category",callback_data=f"ac:editcat:{pid}", style="primary")],[InlineKeyboardButton(text="➕ Add plan",callback_data=f"ac:addplan:{pid}", style="primary")],[InlineKeyboardButton(text="🗑️ Delete product",callback_data=f"ac:deleteproduct:{pid}", style="danger")],[InlineKeyboardButton(text="🔙 Category products",callback_data=f"ac:categorybackpid:{pid}", style="primary")]] + admin_nav_rows()
         await call.message.edit_text(f"📦 <b>{html.escape(p['name'])}</b>\nStatus: {'🛠️ UNDER MAINTENANCE' if p.get('maintenance') else '🟢 Active'}\nCategory: {html.escape(p['category'])}",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback_answer(call,"Updated")
@@ -1099,7 +1257,7 @@ async def ac_add_customer_plan_start(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id):await callback_answer(call,"Admin only",show_alert=True);return
     pid=int(call.data.rsplit(":",1)[1])
     await state.set_state(AdminState.bulk_plan_input);await state.update_data(stock_product_id=pid,bulk_price_mode="customer")
-    await call.message.answer("➕ <b>Bulk Add Customer Plans</b>\nSend multiple lines, one plan per line:\n<code>Duration | Customer INR</code>\nExample:\n<code>1 Hour | 9\n6 Hours | 19\n7 Days | 99</code>\nExisting durations update only customer price. New plans initially use the same reseller price. Send /cancel to stop.")
+    await call.message.answer("➕ <b>Bulk Add Customer Plans</b>\nSend multiple lines, one plan per line:\n<code>Duration | Customer INR</code>\nExample:\n<code>1 Hour | 9\n6 Hours | 19\n7 Days | 99</code>\nExisting durations update only customer price. New plans start with reseller price Not Set; no price is copied automatically. Send /cancel to stop.")
     await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("ac:addresellerplan:"))
@@ -1134,7 +1292,7 @@ async def ac_plan_detail(call:CallbackQuery):
         if not pl:
             await call.message.answer("⚠️ Plan not found. Please reopen Products & Plans.")
             return
-        reseller_display = f"₹{pl['reseller_price_inr']:.2f}" if float(pl['reseller_price_inr'] or 0) > 0 else "Not set"
+        reseller_display = f"₹{pl['reseller_price_inr']:.2f}" if float(pl['reseller_price_inr'] or 0) > 0 else "Not Set"
         kb=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Edit customer price",callback_data=f"ac:planeditcustomer:{pid}",style="primary")],
             [InlineKeyboardButton(text="👑 Edit reseller price",callback_data=f"ac:planeditreseller:{pid}",style="primary")],
@@ -1143,7 +1301,7 @@ async def ac_plan_detail(call:CallbackQuery):
             [InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{pl['product_id']}",style="primary")]
         ] + admin_nav_rows())
         detail=(f"🗓️ <b>{html.escape(pl['duration'])}</b>\n"
-                f"Customer: ₹{pl['price_inr']:.2f}\n"
+                f"Customer: {_format_price(pl['price_inr'])}\n"
                 f"Reseller: {reseller_display}\n"
                 f"Available keys: {pl['stock']}")
         await call.message.answer(detail, reply_markup=kb)
@@ -1155,7 +1313,7 @@ async def ac_plan_detail(call:CallbackQuery):
 async def ac_plan_edit_customer(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id): await callback_answer(call, "Admin only", show_alert=True); return
     pid=int(call.data.rsplit(":",1)[1]); await state.set_state(AdminState.admin_input); await state.update_data(admin_action="plan_edit_customer",plan_id=pid)
-    await call.message.answer("Send the new <b>customer price</b> in INR only. This will not change reseller price. Send <code>0</code> only if you intend a free plan.")
+    await call.message.answer("Send the new <b>customer price</b> in INR only. This will not change reseller price. Price must be greater than ₹0; use the separate role price controls.")
     await callback_answer(call)
 
 @dp.callback_query(F.data.startswith("ac:planeditreseller:"))
@@ -1224,17 +1382,25 @@ async def coupon_delete(call:CallbackQuery):
     code=call.data.split(":",2)[2]; ok=await delete_coupon(code); await admin_log(call.from_user.id,"COUPON_DELETE",code)
     await call.message.edit_text("✅ Coupon deleted." if ok else "Coupon not found.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Coupons",callback_data="adm:coupons", style="primary")]])); await callback_answer(call)
 
-@dp.callback_query(F.data=="setting:add")
-async def setting_add_start(call:CallbackQuery,state:FSMContext):
+@dp.callback_query(F.data.startswith("setting:toggle:"))
+async def setting_toggle(call:CallbackQuery):
     if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
-    await state.set_state(AdminState.admin_input); await state.update_data(admin_action="setting")
-    await call.message.answer("Send SETTING_KEY | VALUE."); await callback_answer(call)
+    key=call.data.split(":",2)[2]
+    if key not in {"store_enabled","maintenance_mode","purchase_enabled","customer_access","reseller_access"}:
+        await callback_answer(call,"Unknown setting",show_alert=True); return
+    current=await setting_enabled(key); value="OFF" if current else "ON"
+    await set_bot_setting(key,value); await admin_log(call.from_user.id,"SETTING_TOGGLE",f"{key}={value}")
+    await render_settings(call.message); await callback_answer(call,f"{key.replace('_',' ').title()} {value}")
 
-@dp.callback_query(F.data.startswith("setting:edit:"))
-async def setting_edit_start(call:CallbackQuery,state:FSMContext):
+@dp.callback_query(F.data.startswith("setting:editvalue:"))
+async def setting_edit_value(call:CallbackQuery,state:FSMContext):
     if not is_admin(call.from_user.id): await callback_answer(call,"Admin only",show_alert=True); return
-    key=call.data.split(":",2)[2]; await state.set_state(AdminState.admin_input); await state.update_data(admin_action="setting_value",setting_key=key)
-    await call.message.answer(f"Send the new value for <code>{html.escape(key)}</code>."); await callback_answer(call)
+    key=call.data.split(":",2)[2]
+    if key not in {"support_username","welcome_message","min_topup"}:
+        await callback_answer(call,"Unknown setting",show_alert=True); return
+    await state.set_state(AdminState.admin_input); await state.update_data(admin_action="setting_value",setting_key=key)
+    prompts={"support_username":"Send the support Telegram username (example: @PanelArmySupport).","welcome_message":"Send the new welcome message. Send /clear to use the default welcome message.","min_topup":"Send the minimum wallet top-up amount in INR (for example: 50)."}
+    await call.message.answer(prompts[key]+"\nUse /cancel to stop."); await callback_answer(call)
 
 @dp.callback_query(F.data.in_({"bc:all","bc:customers","bc:resellers"}))
 async def broadcast_audience(call:CallbackQuery,state:FSMContext):
@@ -1306,7 +1472,12 @@ async def broadcast_send(call:CallbackQuery,state:FSMContext):
 @dp.message(AdminState.admin_input,F.text)
 async def admin_button_input(message:Message,state:FSMContext):
     if not is_admin(message.from_user.id):return
-    data=await state.get_data();action=data.get("admin_action");raw=message.text.strip()
+    raw=message.text.strip()
+    if raw.lower() in {"/cancel","cancel"}:
+        await state.clear()
+        await message.answer("Cancelled.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ Settings",callback_data="adm:settings",style="primary")],[InlineKeyboardButton(text="🏠 Admin Menu",callback_data="stk:admin",style="primary")]]))
+        return
+    data=await state.get_data();action=data.get("admin_action")
     try:
         if action=="game_create":
             ok=await create_game(raw)
@@ -1350,16 +1521,16 @@ async def admin_button_input(message:Message,state:FSMContext):
         elif action=="plan_edit_customer":
             pid=int(data["plan_id"]); price=float(raw.strip())
             ok=await edit_plan_admin(pid,price_inr=price)
-            await message.answer("✅ Customer price updated. Reseller price was left unchanged." if ok else "Plan not found.",reply_markup=admin_keyboard())
+            await message.answer(("✅ Customer price cleared (Not Set)." if price==0 else "✅ Customer price updated.")+" Reseller price was left unchanged." if ok else "Plan not found.",reply_markup=admin_keyboard())
         elif action=="plan_edit_reseller":
             pid=int(data["plan_id"]); price=float(raw.strip())
             ok=await edit_plan_admin(pid,reseller_price_inr=price)
-            await message.answer(("✅ Reseller price cleared (not set)." if price==0 else "✅ Reseller price updated.")+" Customer price was left unchanged." if ok else "Plan not found.",reply_markup=admin_keyboard())
+            await message.answer(("✅ Reseller price cleared (Not Set)." if price==0 else "✅ Reseller price updated.")+" Customer price was left unchanged." if ok else "Plan not found.",reply_markup=admin_keyboard())
         elif action=="plan_customer_add":
             duration,price=[x.strip() for x in raw.split("|",1)]
             result=await add_or_update_customer_plan(int(data["product_id"]),duration,float(price))
             await admin_log(message.from_user.id,"CUSTOMER_PLAN_PRICE",f"plan={result['id']} duration={result['duration']} price={price}")
-            await message.answer(("✅ Customer plan created." if result["created"] else "✅ Customer price updated.")+f"\nPlan ID: <code>{result['id']}</code>\nDuration: {html.escape(result['duration'])}\nCustomer price: ₹{float(price):.2f}\n\nNext, use Set Reseller Plan Price to enter its reseller price.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👑 Set Reseller Price",callback_data=f"ac:addresellerplan:{data['product_id']}",style="primary")],[InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{data['product_id']}",style="primary")]]))
+            await message.answer(("✅ Customer plan created." if result["created"] else "✅ Customer price updated.")+f"\nPlan ID: <code>{result['id']}</code>\nDuration: {html.escape(result['duration'])}\nCustomer price: ₹{float(price):.2f}\n\nReseller pricing is separate and was not changed. If it is unset, resellers will see Not Set. Use Set Reseller Price when ready.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👑 Set Reseller Price",callback_data=f"ac:addresellerplan:{data['product_id']}",style="primary")],[InlineKeyboardButton(text="🔙 Product",callback_data=f"ac:product:{data['product_id']}",style="primary")]]))
         elif action=="plan_reseller_add":
             duration,price=[x.strip() for x in raw.split("|",1)]
             result=await update_reseller_price_by_duration(int(data["product_id"]),duration,float(price))
@@ -1378,9 +1549,15 @@ async def admin_button_input(message:Message,state:FSMContext):
             await message.answer("✅ Coupon updated." if ok else "Coupon not found.",reply_markup=admin_keyboard())
         elif action=="setting_value":
             key=data.get("setting_key")
-            if not key or len(raw)>1000:raise ValueError
-            await set_bot_setting(key,raw);await admin_log(message.from_user.id,"SETTING_UPDATE",key)
-            await message.answer("✅ Setting updated.",reply_markup=admin_keyboard())
+            if key not in {"support_username","welcome_message","min_topup"} or len(raw)>1000:raise ValueError("Invalid setting value.")
+            value="" if key=="welcome_message" and raw.lower()=="/clear" else raw
+            if key=="support_username" and (not value.startswith("@") or len(value)>33 or not value[1:].replace("_", "").isalnum()): raise ValueError("Use a valid @username.")
+            if key=="min_topup":
+                amount=float(value)
+                if amount<1 or amount>50000: raise ValueError("Minimum top-up must be between ₹1 and ₹50,000.")
+                value=f"{amount:g}"
+            await set_bot_setting(key,value);await admin_log(message.from_user.id,"SETTING_UPDATE",key)
+            await message.answer("✅ Setting updated.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ Back to Settings",callback_data="adm:settings",style="primary")]]))
         await state.clear()
     except (ValueError,TypeError) as exc:
         await message.answer(f"Invalid input: {html.escape(str(exc) or 'Please use the format shown above.')}")
@@ -1582,7 +1759,7 @@ async def bulk_plan_input(message:Message,state:FSMContext):
                 if "|" not in line: raise ValueError
                 duration,price_s=line.split("|",1)
                 duration=duration.strip();price=float(price_s.strip().replace("₹","").replace(",",""))
-                if not duration or len(duration)>80 or not 0<=price<=500000:raise ValueError
+                if not duration or len(duration)>80 or not 0<price<=500000:raise ValueError
                 key=duration.casefold()
                 if key in seen:raise ValueError
                 seen.add(key);parsed.append((duration,price))
