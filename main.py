@@ -458,7 +458,7 @@ async def category(call:CallbackQuery):
     products=await list_products(category=name,game=game)
     if not products:
         await call.message.edit_text(
-            f"📂 <b>{html.escape(name)}</b>\\n\\nThere are no products in this category yet. Please check back later.",
+            f"📂 <b>{html.escape(name)}</b>\n\nThere are no products in this category yet. Please check back later.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Categories",callback_data=f"game:{game_hash(game)}",style="primary")]
             ])
@@ -1152,7 +1152,7 @@ async def ac_category_manage(call:CallbackQuery,state:FSMContext):
     await state.update_data(category_name=name,admin_category=name,admin_game=game)
     count=await category_products_admin(name,game)
     kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Rename category",callback_data="ac:categoryrename", style="primary")],[InlineKeyboardButton(text="🗑️ Delete category",callback_data="ac:categorydelete", style="danger")],[InlineKeyboardButton(text="🔙 Manage categories",callback_data="ac:categories", style="primary")]])
-    await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\\n📁 <b>{html.escape(name)}</b>\\nProducts: {count}",reply_markup=kb);await callback_answer(call)
+    await call.message.edit_text(f"🎮 <b>{html.escape(game)}</b>\n📁 <b>{html.escape(name)}</b>\nProducts: {count}",reply_markup=kb);await callback_answer(call)
 
 @dp.callback_query(F.data=="ac:addcategory")
 async def ac_add_category(call:CallbackQuery,state:FSMContext):
@@ -1607,14 +1607,14 @@ async def show_stock_categories(target, state):
     await state.update_data(stock_games=games)
     rows=[[InlineKeyboardButton(text=f"🎮 {g}",callback_data=f"stk:game:{i}",style="primary")] for i,g in enumerate(games)]
     rows += [[InlineKeyboardButton(text="✖ Cancel",callback_data="stk:cancel",style="danger")]]
-    await target.answer("🎮 <b>Step 1 of 4 — Choose a game</b>\\nSelect the game whose inventory you want to manage:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await target.answer("🎮 <b>Step 1 of 4 — Choose a game</b>\nSelect the game whose inventory you want to manage:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 async def show_stock_game_categories(target, state, game):
     categories=await list_categories(game=game)
     await state.update_data(stock_game=game,stock_categories=[c["name"] for c in categories])
     if categories:
-        await target.answer(f"📁 <b>Step 2 of 4 — Choose a category</b>\\nGame: <b>{html.escape(game)}</b>",reply_markup=stock_category_keyboard(categories))
+        await target.answer(f"📁 <b>Step 2 of 4 — Choose a category</b>\nGame: <b>{html.escape(game)}</b>",reply_markup=stock_category_keyboard(categories))
     else:
         await target.answer(f"No categories exist for <b>{html.escape(game)}</b>. Create one in Catalogue Management first.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📁 Open Catalogue Management",callback_data="adm:products",style="primary")],[InlineKeyboardButton(text="⬅ Change game",callback_data="stk:start",style="primary")]]))
 
