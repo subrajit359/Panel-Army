@@ -65,6 +65,7 @@ class Game(Base):
 
 class ProductCategory(Base):
     __tablename__ = "product_categories"
+    game: Mapped[str] = mapped_column(String(80), primary_key=True)
     name: Mapped[str] = mapped_column(String(100), primary_key=True)
 
 class Product(Base):
@@ -183,10 +184,46 @@ class Order(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Ensure legacy product columns exist before game/category backfills below.
+        await conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Other Products'"))
+        await conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS game VARCHAR(80) NOT NULL DEFAULT 'Free Fire'"))
+        await conn.execute(text("UPDATE products SET game='Free Fire' WHERE game IS NULL OR btrim(game)=''"))
         # Additive game catalogue migration; legacy product rows remain untouched.
         await conn.execute(text("CREATE TABLE IF NOT EXISTS games (name VARCHAR(80) PRIMARY KEY, active BOOLEAN NOT NULL DEFAULT TRUE)"))
         await conn.execute(text("INSERT INTO games (name, active) SELECT DISTINCT game, TRUE FROM products WHERE game IS NOT NULL AND btrim(game) <> '' ON CONFLICT (name) DO NOTHING"))
         await conn.execute(text("INSERT INTO games (name, active) VALUES ('Free Fire', TRUE) ON CONFLICT (name) DO NOTHING"))
+        # Scope categories to a game. Preserve legacy categories and copy category
+        # folders into every game that already uses them before replacing the PK.
+        await conn.execute(text("ALTER TABLE product_categories ADD COLUMN IF NOT EXISTS game VARCHAR(80) NOT NULL DEFAULT 'Free Fire'"))
+        await conn.execute(text("""
+            INSERT INTO product_categories (game, name)
+            SELECT DISTINCT p.game, pc.name
+            FROM product_categories pc
+            JOIN products p ON lower(btrim(p.category)) = lower(btrim(pc.name))
+            WHERE p.game IS NOT NULL AND btrim(p.game) <> ''
+            ON CONFLICT DO NOTHING
+        """))
+        await conn.execute(text("""
+            DO $$ DECLARE pk_name TEXT; pk_def TEXT; BEGIN
+                SELECT conname, pg_get_constraintdef(oid) INTO pk_name, pk_def
+                FROM pg_constraint
+                WHERE conrelid='product_categories'::regclass AND contype='p' LIMIT 1;
+                IF pk_name IS NOT NULL AND pk_def <> 'PRIMARY KEY (game, name)' THEN
+                    EXECUTE format('ALTER TABLE product_categories DROP CONSTRAINT %I', pk_name);
+                    pk_name := NULL;
+                END IF;
+                IF pk_name IS NULL THEN
+                    ALTER TABLE product_categories ADD CONSTRAINT product_categories_pkey PRIMARY KEY (game, name);
+                END IF;
+            END $$;
+        """))
+        await conn.execute(text("""
+            INSERT INTO product_categories (game, name)
+            SELECT DISTINCT p.game, p.category FROM products p
+            WHERE p.game IS NOT NULL AND btrim(p.game) <> ''
+              AND p.category IS NOT NULL AND btrim(p.category) <> ''
+            ON CONFLICT (game, name) DO NOTHING
+        """))
         # Additive migrations for databases created by the original starter. Existing data is preserved.
         migrations = [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0",
@@ -292,6 +329,7 @@ async def rename_game(old,new):
             if new != old:
                 # Update product ownership in-place; product IDs, plans, stock and order history remain intact.
                 await s.execute(update(Product).where(Product.game==old).values(game=new))
+                await s.execute(update(ProductCategory).where(ProductCategory.game==old).values(game=new))
                 g.name=new
         return True
 
@@ -303,25 +341,51 @@ async def archive_game(name):
 
 async def list_categories(game=None):
     async with Session() as s:
-        category_stmt = select(Product.category, func.count(Product.id)).where(Product.active == True)
-        if game:
-            category_stmt = category_stmt.where(Product.game == game)
-        rows = (await s.execute(category_stmt.group_by(Product.category))).all()
+        if not game:
+            # Compatibility/admin overview: return categories with their owning game.
+            rows = (await s.execute(
+                select(ProductCategory.game, ProductCategory.name).order_by(ProductCategory.game, ProductCategory.name)
+            )).all()
+            counts = {}
+            product_rows = (await s.execute(
+                select(Product.game, Product.category, func.count(Product.id))
+                .where(Product.active == True).group_by(Product.game, Product.category)
+            )).all()
+            for g, name, count in product_rows:
+                counts[(g, name)] = int(count)
+            for g, name in rows:
+                counts.setdefault((g, name), 0)
+            return [{"game": g, "name": name, "count": counts.get((g, name), 0)} for g, name in sorted(counts)]
+        rows = (await s.execute(
+            select(Product.category, func.count(Product.id))
+            .where(Product.active == True, Product.game == game)
+            .group_by(Product.category)
+        )).all()
         counts = {name: int(count) for name, count in rows}
-        saved = (await s.scalars(select(ProductCategory.name).order_by(ProductCategory.name))).all() if not game else []
+        saved = (await s.scalars(
+            select(ProductCategory.name).where(ProductCategory.game == game).order_by(ProductCategory.name)
+        )).all()
         for name in saved:
             counts.setdefault(name, 0)
         return [{"name": name, "count": counts[name]} for name in sorted(counts)]
 
-async def create_category_admin(name):
+
+async def create_category_admin(name, game="Free Fire"):
     name=(name or "").strip()
-    if not name or len(name)>100: return False
+    game=(game or "").strip()
+    if not name or len(name)>100 or not game or len(game)>80: return False
     async with Session() as s:
         async with s.begin():
-            exists=await s.scalar(select(func.count(ProductCategory.name)).where(func.lower(func.trim(ProductCategory.name))==name.casefold()))
-            product_exists=await s.scalar(select(func.count(Product.id)).where(func.lower(func.trim(Product.category))==name.casefold()))
+            exists=await s.scalar(select(func.count(ProductCategory.name)).where(
+                ProductCategory.game == game,
+                func.lower(func.trim(ProductCategory.name)) == name.casefold()
+            ))
+            product_exists=await s.scalar(select(func.count(Product.id)).where(
+                Product.game == game,
+                func.lower(func.trim(Product.category)) == name.casefold()
+            ))
             if exists or product_exists: return False
-            s.add(ProductCategory(name=name))
+            s.add(ProductCategory(game=game, name=name))
         return True
 
 async def list_products(category=None, include_empty=False, game=None):
@@ -639,24 +703,27 @@ async def add_product(name, price, description, category="Other Products", game=
     # immediately visible in the customer catalogue and admin category list.
     name=(name or "").strip()
     category=(category or "Other Products").strip()
-    if not name or len(name)>160 or not category or len(category)>100:
-        raise ValueError("Invalid product name or category")
+    game=(game or "Free Fire").strip()
+    if not name or len(name)>160 or not category or len(category)>100 or not game or len(game)>80:
+        raise ValueError("Invalid product name, category or game")
     async with Session() as s:
         async with s.begin():
             duplicate=await s.scalar(select(func.count(Product.id)).where(
                 func.lower(func.trim(Product.name))==name.casefold(),
                 func.lower(func.trim(Product.category))==category.casefold(),
+                Product.game==game,
                 Product.active==True
             ))
             if duplicate:
                 raise ValueError("A product with this name already exists in this category")
-            existing_category=await s.scalar(select(ProductCategory.name).where(func.lower(func.trim(ProductCategory.name))==category.casefold()).limit(1))
+            existing_category=await s.scalar(select(ProductCategory.name).where(
+                ProductCategory.game==game,
+                func.lower(func.trim(ProductCategory.name))==category.casefold()
+            ).limit(1))
             if existing_category:
                 category=existing_category
             else:
-                s.add(ProductCategory(name=category))
-            game=(game or "Free Fire").strip()
-            if not game or len(game)>80: raise ValueError("Invalid game name")
+                s.add(ProductCategory(game=game,name=category))
             p=Product(name=name,price_inr=price,description=description or "",category=category,game=game,active=True,maintenance=False)
             s.add(p)
             await s.flush()
@@ -1025,14 +1092,18 @@ async def edit_product(product_id, name=None, category=None, description=None):
             duplicate=await s.scalar(select(func.count(Product.id)).where(
                 Product.id!=product_id,Product.active==True,
                 func.lower(func.trim(Product.name))==target_name.casefold(),
-                func.lower(func.trim(Product.category))==target_category.casefold()
+                func.lower(func.trim(Product.category))==target_category.casefold(),
+                Product.game==p.game
             ))
             if duplicate: raise ValueError("A product with this name already exists in this category")
             if name is not None:p.name=name
             if category is not None:
-                existing=await s.scalar(select(ProductCategory.name).where(func.lower(func.trim(ProductCategory.name))==category.casefold()).limit(1))
+                existing=await s.scalar(select(ProductCategory.name).where(
+                    ProductCategory.game==p.game,
+                    func.lower(func.trim(ProductCategory.name))==category.casefold()
+                ).limit(1))
                 if existing: category=existing
-                else: s.add(ProductCategory(name=category))
+                else: s.add(ProductCategory(game=p.game,name=category))
                 p.category=category
             if description is not None:p.description=description
         return True
@@ -1162,28 +1233,39 @@ async def deactivate_plan_admin(plan_id):
         if not p:return False
         p.active=False;await s.commit();return True
 
-async def rename_category_admin(old_name,new_name):
+async def rename_category_admin(old_name, new_name, game="Free Fire"):
     new_name=(new_name or "").strip()
-    if not new_name or len(new_name)>100:return False
-    if new_name==str(old_name).strip():return True
+    game=(game or "").strip()
+    if not new_name or len(new_name)>100 or not game:return False
+    if new_name.casefold()==str(old_name).strip().casefold():return True
     async with Session() as s:
         async with s.begin():
-            rows=(await s.scalars(select(Product).where(func.lower(func.trim(Product.category))==str(old_name).strip().casefold()))).all()
-            category=await s.get(ProductCategory,old_name)
+            rows=(await s.scalars(select(Product).where(
+                Product.game==game,
+                func.lower(func.trim(Product.category))==str(old_name).strip().casefold()
+            ))).all()
+            category=await s.get(ProductCategory,(game,old_name))
             if not rows and not category:return False
-            if new_name.casefold()!=str(old_name).strip().casefold():
-                collision=await s.scalar(select(func.count(ProductCategory.name)).where(func.lower(func.trim(ProductCategory.name))==new_name.casefold()))
-                product_collision=await s.scalar(select(func.count(Product.id)).where(func.lower(func.trim(Product.category))==new_name.casefold()))
-                if collision or product_collision:return False
+            collision=await s.scalar(select(func.count(ProductCategory.name)).where(
+                ProductCategory.game==game,
+                func.lower(func.trim(ProductCategory.name))==new_name.casefold()
+            ))
+            product_collision=await s.scalar(select(func.count(Product.id)).where(
+                Product.game==game,
+                func.lower(func.trim(Product.category))==new_name.casefold()
+            ))
+            if collision or product_collision:return False
             for product in rows: product.category=new_name
             if category: await s.delete(category)
-            # Remove any duplicate saved folder rows only after checking collision above.
-            s.add(ProductCategory(name=new_name))
+            s.add(ProductCategory(game=game,name=new_name))
         return True
 
-async def category_products_admin(name):
+
+async def category_products_admin(name, game="Free Fire"):
     async with Session() as s:
-        return int(await s.scalar(select(func.count(Product.id)).where(Product.category==name,Product.active==True)) or 0)
+        return int(await s.scalar(select(func.count(Product.id)).where(
+            Product.game==game, func.lower(func.trim(Product.category))==str(name).strip().casefold(), Product.active==True
+        )) or 0)
 
 
 async def list_resellers(limit=50):
@@ -1211,14 +1293,17 @@ async def delete_coupon(code):
         if not c:return False
         await s.delete(c);await s.commit();return True
 
-async def delete_category_admin(name):
-    """Delete a category and its products/plans/stock; preserve order records detached from catalogue."""
+async def delete_category_admin(name, game="Free Fire"):
+    """Delete only one game's category and its products; preserve detached order history."""
     async with Session() as s:
         async with s.begin():
-            category=await s.get(ProductCategory,name)
+            category=await s.get(ProductCategory,(game,name))
             normalized_name = str(name or "").strip().casefold()
             products=(await s.scalars(
-                select(Product).where(func.lower(func.trim(Product.category)) == normalized_name).with_for_update()
+                select(Product).where(
+                    Product.game==game,
+                    func.lower(func.trim(Product.category)) == normalized_name
+                ).with_for_update()
             )).all()
             product_ids=[p.id for p in products]
             if not category and not product_ids:
